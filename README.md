@@ -5,7 +5,6 @@ Run the [SWE-bench](https://github.com/swe-bench/SWE-bench) benchmark on
 
 ---
 
-## 1. What this is
 
 A harness that evaluates SWE-bench instances inside **E2B sandboxes** instead of
 local Docker. SWE-bench's grading logic is pure Python (no Docker dependency), so
@@ -101,7 +100,7 @@ Validated with `e2b 2.26`, `swebench 4.1`, `datasets 5.0`. Dataset defaults to
 
 ---
 
-## 4. How to run it
+## 4. How to run
 
 Run from the repo root with the venv active and `E2B_API_KEY` set. Use
 `python -u` for live progress on long background runs.
@@ -248,7 +247,7 @@ scripts/
   run_eval.py          evaluate gold patches or a predictions file
 ```
 
-### Gotchas baked in
+### Notes
 
 - **Timeouts in seconds**; sandbox max continuous life is 1 h (Base) / 24 h (Pro).
 - Combined **stdout+stderr** is captured to a file, so Django-style stderr results
