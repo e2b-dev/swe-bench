@@ -98,6 +98,36 @@ export E2B_API_KEY=...           # required (or put it in a .env file)
 Validated with `e2b 2.26`, `swebench 4.1`, `datasets 5.0`. Dataset defaults to
 **SWE-bench_Verified** (500 instances, full x86_64 image coverage).
 
+### Choosing a dataset
+
+Pick the dataset with `SWEBENCH_DATASET` (and `SWEBENCH_SPLIT`, default `test`):
+
+```bash
+SWEBENCH_DATASET=princeton-nlp/SWE-bench_Lite \
+  python scripts/build_and_verify.py --all --batch-size 25 --stop-on-fail
+```
+
+| variant | HuggingFace id | test size | when to use | works with this project? |
+| --- | --- | --- | --- | --- |
+| **Verified** *(default)* | `princeton-nlp/SWE-bench_Verified` | 500 | human-validated, non-flaky — the standard leaderboard set | ✅ 100% prebuilt x86_64 images |
+| **Lite** | `princeton-nlp/SWE-bench_Lite` | 300 | cheap/fast iteration; a curated easier subset | ✅ covered (subset of Full) |
+| **Full** | `princeton-nlp/SWE-bench` | 2,294 | the complete set — comprehensive but slower & noisier | ✅ ~99.8% image coverage (a few unbuilt) |
+| **Multimodal** | `SWE-bench/SWE-bench_Multimodal` | 500 | JS/visual issues with screenshots | ❌ cloud-only (`sb-cli`); private test split, no public images — different harness |
+| **Multilingual** | `SWE-bench/SWE-bench_Multilingual` | 300 | 9 programming languages / 42 repos | ⚠️ newer & non-Python; `swebench` can grade it, but **verify prebuilt-image coverage** before a full run |
+
+**Recommendation:** start with **Verified** (the default). Drop to **Lite** for a
+cheaper smoke; use **Full** when you need everything. **Multimodal** requires the
+cloud `sb-cli` path (out of scope for this per-instance-template project), and
+**Multilingual** is newer/experimental here.
+
+Notes:
+- Both HuggingFace orgs work for the core sets — `princeton-nlp/…` (legacy, the
+  default here) and `SWE-bench/…` (the newer canonical org, which also hosts the
+  newest variants like Multilingual).
+- All variants evaluate on the `test` split; some also ship a smaller `dev` split.
+- *"SWE-bench Pro"* is a separate third-party benchmark — not part of this family
+  and not loadable through this project.
+
 ---
 
 ## 4. How to run
