@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.e2b/
+e2b.toml
+predictions*.jsonl
+report*.json
+logs/
+results/
+_introspect*.py
+.env
+
+# python build artifacts
+*.egg-info/
+build/
+dist/
+
+# local Claude Code settings
+.claude/

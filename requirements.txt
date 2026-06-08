@@ -1,0 +1,4 @@
+# Validated against these versions (2026-06):
+e2b>=2.26.0
+swebench>=4.1.0
+datasets>=3.0.0

@@ -1,0 +1,17 @@
+[project]
+name = "e2b-swebench"
+version = "0.1.0"
+description = "Run the SWE-bench benchmark on E2B sandboxes (Strategy A: per-instance templates)"
+requires-python = ">=3.10"
+dependencies = [
+    "e2b>=2.26.0",
+    "swebench>=4.1.0",
+    "datasets>=3.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["e2b_swebench"]
