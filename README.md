@@ -1,7 +1,7 @@
 # SWE-bench on E2B
 
 Run the [SWE-bench](https://github.com/swe-bench/SWE-bench) benchmark on
-[E2B](https://e2b.dev) sandboxes.
+[E2B](https://e2b.dev/?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=swe-bench) sandboxes.
 
 ---
 
