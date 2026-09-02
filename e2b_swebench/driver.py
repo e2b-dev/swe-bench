@@ -73,6 +73,15 @@ def _detect_warning_error(output: str) -> bool:
     )
 
 
+def _is_whole_repository_restore(command: str, base_commit: str) -> bool:
+    """Return whether one generated shell command restores the whole repo."""
+    tokens = command.split()
+    return tokens in (
+        ["git", "checkout", base_commit],
+        ["git", "reset", "--hard", base_commit],
+    )
+
+
 def _eval_script_preserving_image_setup(test_spec, instance: dict) -> str:
     """Keep the SWE-bench image's setup commit active during evaluation.
 
@@ -81,15 +90,25 @@ def _eval_script_preserving_image_setup(test_spec, instance: dict) -> str:
     before and after the test patch, which drops those fixes. That can make a
     passing pytest run ungradeable (compact ``.`` output instead of the test ID),
     as in sphinx-doc__sphinx-8595. Every run uses a fresh sandbox, so cleanup is
-    unnecessary; replacing only the exact base checkout preserves the candidate
-    working-tree patch and lets the test patch apply on the setup commit.
+    unnecessary. Replacing only complete-repository restore commands preserves
+    path-specific held-out-test checkout commands, the candidate working-tree
+    patch, and the generated test sequence.
     """
-    checkout = re.compile(
-        rf"^git checkout {re.escape(instance['base_commit'])}\s*$", re.MULTILINE
-    )
-    return checkout.sub(
-        ": # preserve SWE-bench image setup commit", test_spec.eval_script
-    )
+    commands = test_spec.eval_script_list
+    serialized_commands = "\n".join(commands) + "\n"
+    script = test_spec.eval_script
+    if not script.endswith(serialized_commands):
+        raise ValueError("unsupported SWE-bench TestSpec eval_script serialization")
+
+    rewritten_commands = [
+        (
+            ": # preserve SWE-bench image setup commit"
+            if _is_whole_repository_restore(command, instance["base_commit"])
+            else command
+        )
+        for command in commands
+    ]
+    return script[: -len(serialized_commands)] + "\n".join(rewritten_commands) + "\n"
 
 
 def _attach_execution_stats(verdict: dict, sbx, started_at: float) -> None:

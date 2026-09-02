@@ -484,13 +484,15 @@ class ResumeIdentityTests(unittest.TestCase):
 class DriverTests(unittest.TestCase):
     def test_eval_script_preserves_setup_commit(self):
         base = "a" * 40
+        commands = [
+            "git status",
+            f"git checkout {base} ",
+            "git apply /tmp/tests.patch",
+            f"git checkout {base}",
+        ]
         spec = SimpleNamespace(
-            eval_script=(
-                "git status\n"
-                f"git checkout {base} \n"
-                "git apply /tmp/tests.patch\n"
-                f"git checkout {base}\n"
-            )
+            eval_script_list=commands,
+            eval_script="#!/bin/bash\n" + "\n".join(commands) + "\n",
         )
         result = _eval_script_preserving_image_setup(spec, {"base_commit": base})
         self.assertNotIn(f"git checkout {base}", result)

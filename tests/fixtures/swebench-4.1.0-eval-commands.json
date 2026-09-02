@@ -1,0 +1,23 @@
+{
+  "generator": "swebench==4.1.0",
+  "whole_repository": {
+    "repo": "astropy/astropy",
+    "version": "4.3",
+    "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "checkout": "git checkout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ",
+    "reset": "git reset --hard aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "install": "python -m pip install -e .[test] --verbose",
+    "apply_prefix": "git apply -v - <<'EOF_114329324912'",
+    "test": "pytest -rA"
+  },
+  "path_specific": {
+    "repo": "pytest-dev/pytest",
+    "version": "7.0",
+    "base_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "checkout": "git checkout bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb testing/test_example.py",
+    "checkout_with_separator": "git checkout bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -- testing/test_example.py",
+    "install": "python -m pip install -e .",
+    "apply_prefix": "git apply -v - <<'EOF_114329324912'",
+    "test": "pytest -rA testing/test_example.py"
+  }
+}
