@@ -6,21 +6,14 @@ resumed across sessions (finish some tonight, continue tomorrow).
 
 verify categories:
   pass              - gold resolved; template is good
-  ordering_artifact - gold fix applied & all FAIL_TO_PASS pass, only PASS_TO_PASS
-                      regressed (the known non-Docker test-ordering effect; the
-                      template itself is fine, see django__django-10097)
-  collection_error  - a test module failed to COLLECT (import-time error), almost
-                      always upstream image drift (e.g. setuptools 68's distutils
-                      DeprecationWarning vs astropy's warnings-as-errors). NOT a
-                      template defect, affects the official Docker harness too;
-                      see astropy__astropy-8872.
-  warning_error     - same image-drift family, but at TEST time: a drifted-dependency
-                      warning (e.g. pytest's nose-deprecation) is promoted to an error
-                      by the repo's warnings-as-errors config; see astropy__astropy-8707.
+  grader_artifact   - a specifically verified test-ID mismatch in canonical grading
+  ordering_artifact - a specifically verified full-suite order-pollution failure
+  collection_error  - a test module failed to collect
+  warning_error     - a dependency warning was promoted to a test error
   fail              - gold did not apply, or a FAIL_TO_PASS test genuinely failed -> investigate
   error             - sandbox/transient error -> retried on the next run
-pass / ordering_artifact / collection_error / warning_error are DONE (skipped on
-resume) — they are environment facts, not template defects. fail / error are reprocessed.
+Only pass and the two evidence-backed, instance-specific artifacts are DONE.
+All other non-resolutions are reprocessed on resume.
 """
 
 import datetime
@@ -28,7 +21,21 @@ import json
 import os
 from collections import Counter
 
-DONE = ("pass", "ordering_artifact", "collection_error", "warning_error")
+DONE = ("pass", "grader_artifact", "ordering_artifact")
+
+# These exceptions were reproduced under the final evaluator and independently
+# audited. Do not generalize all PASS_TO_PASS-only failures into artifacts: a
+# newly observed regression must remain a failure until it is investigated.
+_KNOWN_GOLD_ARTIFACTS = {
+    "astropy__astropy-7606": (
+        "grader_artifact",
+        "pytest emits test_compose_roundtrip[unit0], dataset expects []",
+    ),
+    "django__django-10097": (
+        "ordering_artifact",
+        "five generic_inline_admin tests pass alone but fail after the full suite",
+    ),
+}
 
 
 def categorize_verdict(v: dict) -> tuple[str, dict]:
@@ -44,6 +51,9 @@ def categorize_verdict(v: dict) -> tuple[str, dict]:
         "error": v.get("error"),
         "collection_error": bool(v.get("collection_error")),
         "warning_error": bool(v.get("warning_error")),
+        "resource_exhausted": bool(v.get("resource_exhausted")),
+        "runtime_seconds": v.get("runtime_seconds"),
+        "metrics": v.get("metrics"),
     }
     if v.get("error"):
         return "error", detail
@@ -55,10 +65,16 @@ def categorize_verdict(v: dict) -> tuple[str, dict]:
     # a drifted-dependency warning was promoted to a test error -> same env family
     if v.get("warning_error"):
         return "warning_error", detail
-    # gold fix applied, every FAIL_TO_PASS passes, only PASS_TO_PASS regressed:
-    # test-ordering artifact, not a build defect.
-    if detail["patch_applied"] and detail["f2p_fail"] == 0 and detail["p2p_fail"] > 0:
-        return "ordering_artifact", detail
+    known_artifact = _KNOWN_GOLD_ARTIFACTS.get(v.get("instance_id"))
+    if (
+        known_artifact
+        and detail["patch_applied"]
+        and detail["f2p_fail"] == 0
+        and detail["p2p_fail"] > 0
+    ):
+        category, reason = known_artifact
+        detail["artifact_reason"] = reason
+        return category, detail
     return "fail", detail
 
 
@@ -76,13 +92,22 @@ class Ledger:
     def verify_status(self, iid: str):
         return self.get(iid).get("verify")
 
-    def is_done(self, iid: str) -> bool:
-        return self.verify_status(iid) in DONE
+    def is_done(
+        self, iid: str, cpu_count: int | None = None, memory_mb: int | None = None
+    ) -> bool:
+        record = self.get(iid)
+        if cpu_count is not None and record.get("cpu_count") != cpu_count:
+            return False
+        if memory_mb is not None and record.get("memory_mb") != memory_mb:
+            return False
+        return record.get("verify") in DONE
 
     def update(self, iid: str, **fields) -> None:
         rec = self.data.setdefault(iid, {"instance_id": iid})
         rec.update(fields)
-        rec["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+        rec["updated_at"] = datetime.datetime.now(datetime.UTC).isoformat(
+            timespec="seconds"
+        )
 
     def save(self) -> None:
         d = os.path.dirname(self.path)
@@ -99,6 +124,10 @@ class Ledger:
     def summary(self) -> dict:
         return {
             "total": len(self.data),
-            "build": dict(Counter(r.get("build") or "pending" for r in self.data.values())),
-            "verify": dict(Counter(r.get("verify") or "pending" for r in self.data.values())),
+            "build": dict(
+                Counter(r.get("build") or "pending" for r in self.data.values())
+            ),
+            "verify": dict(
+                Counter(r.get("verify") or "pending" for r in self.data.values())
+            ),
         }

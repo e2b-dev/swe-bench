@@ -6,29 +6,38 @@ replaces the per-instance *execution environment*.
 """
 
 from .dataset import (
+    empty_prediction,
+    gold_prediction,
     load_instances,
     parse_tests,
-    gold_prediction,
-    empty_prediction,
     select_per_repo,
 )
-from .templates import template_name, instance_image, ensure_template, build_many
 from .driver import run_instance, run_instance_async
-from .runner import run_many
 from .logs import quiet_logs
+from .metrics import summarize_metrics
+from .runner import run_many
+from .templates import (
+    build_many,
+    ensure_template,
+    instance_image,
+    template_name,
+    template_ready,
+)
 
 __all__ = [
+    "build_many",
+    "empty_prediction",
+    "ensure_template",
+    "gold_prediction",
+    "instance_image",
     "load_instances",
     "parse_tests",
-    "gold_prediction",
-    "empty_prediction",
-    "select_per_repo",
-    "template_name",
-    "instance_image",
-    "ensure_template",
-    "build_many",
+    "quiet_logs",
     "run_instance",
     "run_instance_async",
     "run_many",
-    "quiet_logs",
+    "select_per_repo",
+    "summarize_metrics",
+    "template_name",
+    "template_ready",
 ]

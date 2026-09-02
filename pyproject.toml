@@ -7,6 +7,7 @@ dependencies = [
     "e2b>=2.26.0",
     "swebench>=4.1.0",
     "datasets>=3.0.0",
+    "tomli>=2.0.0; python_version < '3.11'",
 ]
 
 [build-system]

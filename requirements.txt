@@ -1,4 +1,6 @@
-# Validated against these versions (2026-06):
+# Convenience requirements for pip users. The fully verified environment is
+# pinned in uv.lock; prefer `uv sync --locked` from the README.
 e2b>=2.26.0
 swebench>=4.1.0
 datasets>=3.0.0
+tomli>=2.0.0; python_version < "3.11"

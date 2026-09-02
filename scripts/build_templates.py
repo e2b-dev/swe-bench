@@ -23,7 +23,9 @@ def main() -> int:
     ap.add_argument("--instances", help="comma-separated instance_ids")
     ap.add_argument("--per-repo", type=int, help="build N instances per distinct repo")
     ap.add_argument("--limit", type=int, help="build the first N instances")
-    ap.add_argument("--all", action="store_true", help="build every instance in the dataset")
+    ap.add_argument(
+        "--all", action="store_true", help="build every instance in the dataset"
+    )
     ap.add_argument("--cpu", type=int, default=DEFAULT_CPU)
     ap.add_argument("--memory-mb", type=int, default=DEFAULT_MEMORY_MB)
     ap.add_argument("--workers", type=int, default=4, help="parallel build processes")
@@ -47,14 +49,21 @@ def main() -> int:
         print(f"NOT IN DATASET: {i}")
     selected = [instances[i] for i in ids if i in instances]
 
-    print(f"Building {len(selected)} template(s) with {args.workers} worker process(es) ...")
+    print(
+        f"Building {len(selected)} template(s) with {args.workers} worker process(es) ..."
+    )
     results = build_many(
-        selected, workers=args.workers, cpu_count=args.cpu,
-        memory_mb=args.memory_mb, force=args.force,
+        selected,
+        workers=args.workers,
+        cpu_count=args.cpu,
+        memory_mb=args.memory_mb,
+        force=args.force,
     )
 
     built = sum(1 for r in results.values() if not isinstance(r, Exception) and r[1])
-    exists = sum(1 for r in results.values() if not isinstance(r, Exception) and not r[1])
+    exists = sum(
+        1 for r in results.values() if not isinstance(r, Exception) and not r[1]
+    )
     failed = sum(1 for r in results.values() if isinstance(r, Exception)) + len(missing)
     print(f"\nbuilt={built} exists={exists} failed={failed}")
     return 1 if failed else 0
