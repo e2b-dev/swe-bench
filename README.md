@@ -1,7 +1,6 @@
 # SWE-bench on E2B
 
-Run the [SWE-bench](https://github.com/swe-bench/SWE-bench) benchmark on
-[E2B](https://e2b.dev/?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=swe-bench) sandboxes.
+Run the [SWE-bench](https://github.com/swe-bench/SWE-bench) benchmark on [E2B](https://e2b.dev/?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=swe-bench) sandboxes.
 
 ---
 
@@ -91,6 +90,8 @@ test still passes.**
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .                 # makes the `e2b_swebench` package importable from scripts
+# pip install -e '.[muse]'       # optional: only to GENERATE predictions (§4e)
+# pip install -e '.[dev]'        # optional: to run the offline tests — `pytest tests/`
 export E2B_API_KEY=...           # required (or put it in a .env file)
 # export HF_TOKEN=...            # optional: faster dataset downloads
 ```
@@ -218,10 +219,44 @@ python scripts/run_eval.py --predictions preds.jsonl --concurrency 20 --build --
 | `--out` | `results` | output directory |
 | `--resume` | off | skip instances already in `<out>/verdicts.jsonl` |
 
-A prediction is one JSON object per line:
-`{"instance_id", "model_name_or_path", "model_patch"}` — the format the official
-harness consumes. For a real agent: hand it a sandbox at HEAD + the
-`problem_statement`, let it edit `/testbed`, and capture `git -C /testbed diff`.
+A prediction is one JSON object per line: `{"instance_id", "model_name_or_path", "model_patch"}` — the format the official harness consumes. For a real agent: hand it a sandbox at HEAD + the `problem_statement`, let it edit `/testbed`, and capture all changes relative to the starting HEAD, including newly created files.
+
+### e) Generate predictions with an agent — Meta's Muse Spark
+
+`scripts/run_agent.py` generates prediction patches; it does not grade them. The Muse Spark model loop stays in the caller process, while its commands and file writes run in a fresh E2B sandbox created from each instance's template.
+
+The model receives only the repository name and `problem_statement`. It does not receive `test_patch`, `FAIL_TO_PASS`, `PASS_TO_PASS`, the reference patch, or grader output. The generated patch is evaluated later in another fresh sandbox with the existing canonical grader.
+
+```bash
+pip install -e '.[muse]'
+export META_API_KEY=...          # stays in this process
+export E2B_API_KEY=...
+
+# Templates must already exist; see §4c.
+python scripts/run_agent.py --instances astropy__astropy-12907
+
+# Grade the generated patch independently.
+python scripts/run_eval.py --predictions results/predictions.jsonl --out results/eval
+```
+
+Use `python scripts/run_agent.py --list-agents` to list the available agents and their required environment variables.
+
+| option | default | meaning |
+| --- | --- | --- |
+| `--instances` / `--limit N` / `--per-repo N` | — | **required**: which instances to generate for |
+| `--agent` | `muse-spark` | agent used to generate patches |
+| `--model` | `muse-spark-1.1` | model id (also `META_MODEL`) |
+| `--max-steps` | `30` | maximum model turns per instance |
+| `--sandbox-timeout` | `2400` | sandbox lifetime, seconds |
+| `--out` | `results/predictions.jsonl` | predictions, in the official format |
+| `--status` | `generation.jsonl` beside `--out` | per-instance generation outcome |
+| `--skip-preflight` | off | skip the model connectivity check |
+
+Before generation, the script checks that every selected template exists and sends a short model request to catch an invalid key or model id. Generation is sequential, and sandbox cleanup runs even if an instance fails. Cleanup failures are reported in the status output. A failed instance still produces an empty-patch row, so it is graded unresolved instead of being omitted. Permanent API errors stop the batch early.
+
+The defaults follow Meta's public [Model API cookbook](https://github.com/meta-models/meta-model-cookbook): the OpenAI-compatible endpoint is `https://api.meta.ai/v1` and the default model is `muse-spark-1.1`. Override the endpoint with `META_BASE_URL` and the model with `--model` or `META_MODEL`.
+
+**Generation uses both Meta Model API and E2B resources.** Start with one explicit `--instances` id. The implementation is covered by offline tests, but a live end-to-end run requires valid credentials and incurs provider usage.
 
 ---
 
@@ -255,7 +290,8 @@ Notes:
 | `results/ledger.json` | build_and_verify | per-instance build+verify state; **resume source of truth** |
 | `results/verdicts.jsonl` | run_eval | one verdict per instance as it completes; resume source |
 | `results/report.json` | run_eval | summary + all verdicts |
-| `results/predictions.jsonl` | run_eval | the predictions that were scored |
+| `results/predictions.jsonl` | run_eval, run_agent | the predictions that were scored / generated |
+| `results/generation.jsonl` | run_agent | per-instance generation status (steps, patch size, sandbox id, error) — **not** graded |
 
 ---
 
@@ -270,11 +306,16 @@ e2b_swebench/
   runner.py      run_many (concurrent, resumable) + summarize
   ledger.py      Ledger + categorize_verdict (pass / ordering_artifact / fail / error)
   logs.py        quiet_logs
+  agents/
+    __init__.py    AgentSpec + REGISTRY: the `--agent` lookup table
+    muse_spark.py  generate predictions with Meta's Muse Spark (optional `[muse]` extra)
 scripts/
   smoke_test.py        one-instance sanity check
   build_and_verify.py  batched, resumable build + gold-verify with a ledger
   build_templates.py   build templates only
+  run_agent.py         generate predictions with Muse Spark (does not grade)
   run_eval.py          evaluate gold patches or a predictions file
+tests/                 offline unit tests (doubles only — no E2B, no model API)
 ```
 
 ### Notes
@@ -286,4 +327,3 @@ scripts/
   per-repo parser), never a hand-rolled regex.
 - Parallel builds use **processes** — the E2B SDK shares one HTTP/2 connection, so
   thread-based parallelism collides (`invalid_new_stream_id`).
-  
