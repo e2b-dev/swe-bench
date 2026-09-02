@@ -17,15 +17,22 @@ from .logs import quiet_logs
 from .metrics import summarize_metrics
 from .runner import run_many
 from .templates import (
+    TemplateSpec,
     build_many,
+    content_key,
     ensure_template,
     instance_image,
+    resolve_image,
     template_name,
+    template_name_from_spec,
     template_ready,
+    template_spec,
 )
 
 __all__ = [
+    "TemplateSpec",
     "build_many",
+    "content_key",
     "empty_prediction",
     "ensure_template",
     "gold_prediction",
@@ -33,11 +40,14 @@ __all__ = [
     "load_instances",
     "parse_tests",
     "quiet_logs",
+    "resolve_image",
     "run_instance",
     "run_instance_async",
     "run_many",
     "select_per_repo",
     "summarize_metrics",
     "template_name",
+    "template_name_from_spec",
     "template_ready",
+    "template_spec",
 ]

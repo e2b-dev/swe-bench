@@ -39,6 +39,8 @@ ARCH = "x86_64"
 DEFAULT_CPU = int(os.environ.get("SWEBENCH_CPU", "4"))
 DEFAULT_MEMORY_MB = int(os.environ.get("SWEBENCH_MEMORY_MB", "4096"))  # must be even
 TEMPLATE_PREFIX = "swebench-"
+TEMPLATE_WORKDIR = "/testbed"
+TEMPLATE_CONSTRUCTION_SCHEMA = 1
 
 # --- runtime timeouts (seconds) ---
 SANDBOX_TIMEOUT = int(

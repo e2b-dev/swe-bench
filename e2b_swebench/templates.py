@@ -6,8 +6,13 @@ The image already has /testbed checked out at base_commit and the conda env
 the local microVM disk (fast). Builds run server-side on E2B — no local Docker.
 """
 
+import hashlib
+import json
 import re
 import time
+from dataclasses import dataclass
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 from e2b import (
     BuildException,
@@ -25,28 +30,174 @@ from .config import (
     DEFAULT_CPU,
     DEFAULT_MEMORY_MB,
     NAMESPACE,
+    TEMPLATE_CONSTRUCTION_SCHEMA,
     TEMPLATE_PREFIX,
+    TEMPLATE_WORKDIR,
 )
 
 _BUILD_RECOVERY_INTERVAL = 10
 _BUILD_RETRIES = 2
+_CONTENT_KEY_SUFFIX_LENGTH = 24
+_DOCKER_HUB_REGISTRIES = {
+    "docker.io",
+    "index.docker.io",
+    "registry-1.docker.io",
+}
+_MANIFEST_ACCEPT = (
+    "application/vnd.oci.image.index.v1+json, "
+    "application/vnd.oci.image.manifest.v1+json, "
+    "application/vnd.docker.distribution.manifest.list.v2+json, "
+    "application/vnd.docker.distribution.manifest.v2+json"
+)
+_SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+
+
+@dataclass(frozen=True)
+class TemplateSpec:
+    """Every input that determines an E2B template's immutable contents."""
+
+    instance_id: str
+    source_image: str
+    workdir: str = TEMPLATE_WORKDIR
+    architecture: str = ARCH
+    namespace: str = NAMESPACE
+    cpu_count: int = DEFAULT_CPU
+    memory_mb: int = DEFAULT_MEMORY_MB
+    construction_schema: int = TEMPLATE_CONSTRUCTION_SCHEMA
+
+    def __post_init__(self) -> None:
+        _, separator, digest = self.source_image.rpartition("@")
+        if not separator or not _SHA256_DIGEST.fullmatch(digest):
+            raise ValueError(
+                "source_image must be pinned to a lowercase SHA-256 digest"
+            )
+        if not isinstance(self.construction_schema, int):
+            raise TypeError("construction_schema must be an integer")
+
+
+def _open_registry(request: Request):
+    return urlopen(request, timeout=30)
+
+
+def _docker_hub_reference(image: str) -> tuple[str, str, str]:
+    """Return (display repository, registry repository, tag)."""
+    first_component, separator, remainder = image.partition("/")
+    if separator and (
+        "." in first_component
+        or ":" in first_component
+        or first_component == "localhost"
+    ):
+        if first_component not in _DOCKER_HUB_REGISTRIES:
+            raise ValueError(f"only Docker Hub images are supported: {image!r}")
+        display_repository = remainder
+    else:
+        display_repository = image
+
+    last_slash = display_repository.rfind("/")
+    last_colon = display_repository.rfind(":")
+    if last_colon > last_slash:
+        display_repository, tag = (
+            display_repository[:last_colon],
+            display_repository[last_colon + 1 :],
+        )
+    else:
+        tag = "latest"
+    if not display_repository or not tag:
+        raise ValueError(f"invalid Docker Hub image reference: {image!r}")
+
+    registry_repository = (
+        display_repository
+        if "/" in display_repository
+        else f"library/{display_repository}"
+    )
+    return display_repository, registry_repository, tag
+
+
+def resolve_image(image: str) -> str:
+    """Resolve a Docker Hub tag to a repository reference pinned by digest."""
+    repository, separator, digest = image.rpartition("@")
+    if separator:
+        if not repository or not _SHA256_DIGEST.fullmatch(digest):
+            raise ValueError(f"invalid SHA-256 image reference: {image!r}")
+        return image
+
+    display_repository, registry_repository, tag = _docker_hub_reference(image)
+    token_query = urlencode(
+        {
+            "service": "registry.docker.io",
+            "scope": f"repository:{registry_repository}:pull",
+        }
+    )
+    token_request = Request(f"https://auth.docker.io/token?{token_query}")
+    with _open_registry(token_request) as response:
+        token_payload = json.load(response)
+    token = token_payload.get("token") or token_payload.get("access_token")
+    if not token:
+        raise ValueError("Docker Hub token response did not include an access token")
+
+    manifest_url = (
+        "https://registry-1.docker.io/v2/"
+        f"{quote(registry_repository, safe='/')}/manifests/{quote(tag, safe='')}"
+    )
+    manifest_request = Request(
+        manifest_url,
+        headers={"Accept": _MANIFEST_ACCEPT, "Authorization": f"Bearer {token}"},
+        method="HEAD",
+    )
+    with _open_registry(manifest_request) as response:
+        resolved_digest = response.headers.get("Docker-Content-Digest", "").lower()
+    if not _SHA256_DIGEST.fullmatch(resolved_digest):
+        raise ValueError(
+            "Docker Hub manifest response did not include a SHA-256 digest"
+        )
+    return f"{display_repository}@{resolved_digest}"
+
+
+def content_key(spec: TemplateSpec) -> str:
+    """Hash the canonical, complete template construction contract."""
+    canonical = {
+        "architecture": spec.architecture,
+        "construction_schema": spec.construction_schema,
+        "cpu_count": spec.cpu_count,
+        "memory_mb": spec.memory_mb,
+        "namespace": spec.namespace,
+        "source_image": spec.source_image,
+        "workdir": spec.workdir,
+    }
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def template_name_from_spec(spec: TemplateSpec) -> str:
+    """Return the only alias eligible for reuse for this complete spec."""
+    suffix = content_key(spec)[:_CONTENT_KEY_SUFFIX_LENGTH]
+    slug = re.sub(r"[^a-z0-9]+", "-", spec.instance_id.lower()).strip("-")
+    slug_room = 63 - len(TEMPLATE_PREFIX) - len(suffix) - 1
+    slug = slug[:slug_room].rstrip("-") or "template"[:slug_room]
+    return f"{TEMPLATE_PREFIX}{slug}-{suffix}"
+
+
+def template_spec(
+    instance: dict,
+    cpu_count: int = DEFAULT_CPU,
+    memory_mb: int = DEFAULT_MEMORY_MB,
+) -> TemplateSpec:
+    """Resolve an instance's mutable source and return its immutable spec."""
+    return TemplateSpec(
+        instance_id=instance["instance_id"],
+        source_image=resolve_image(instance_image(instance)),
+        cpu_count=cpu_count,
+        memory_mb=memory_mb,
+    )
 
 
 def template_name(
-    instance_id: str,
+    instance: dict,
     cpu_count: int = DEFAULT_CPU,
     memory_mb: int = DEFAULT_MEMORY_MB,
 ) -> str:
-    """E2B template names are lowercase [a-z0-9-]. e.g.
-    'astropy__astropy-12907' at 4 CPU / 8 GiB becomes
-    'swebench-astropy-astropy-12907-4c-8192m'.
-
-    Resources are part of the name because E2B bakes them into the template.
-    Without the suffix, a custom-size run can silently reuse a template built
-    with different resources.
-    """
-    slug = re.sub(r"[^a-z0-9]+", "-", instance_id.lower()).strip("-")
-    return f"{TEMPLATE_PREFIX}{slug}-{cpu_count}c-{memory_mb}m"
+    """Resolve an instance and derive its current immutable template alias."""
+    return template_name_from_spec(template_spec(instance, cpu_count, memory_mb))
 
 
 def instance_image(instance: dict) -> str:
@@ -113,12 +264,12 @@ def ensure_template(
 
     quiet_logs()
 
-    name = template_name(instance["instance_id"], cpu_count, memory_mb)
+    spec = template_spec(instance, cpu_count, memory_mb)
+    name = template_name_from_spec(spec)
     if not force and template_ready(name):
         return name, False
 
-    image = instance_image(instance)
-    builder = Template().from_image(image).set_workdir("/testbed")
+    builder = Template().from_image(spec.source_image).set_workdir(spec.workdir)
     last_error = None
     for attempt in range(_BUILD_RETRIES + 1):
         try:

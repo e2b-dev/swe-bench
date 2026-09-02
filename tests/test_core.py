@@ -1,22 +1,110 @@
+import asyncio
 import tempfile
 import unittest
+from dataclasses import replace
+from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from e2b import BuildException, SandboxException
 
 from e2b_swebench.driver import _eval_script_preserving_image_setup
 from e2b_swebench.ledger import Ledger, categorize_verdict
 from e2b_swebench.metrics import summarize_metrics
-from e2b_swebench.templates import ensure_template, template_name, template_ready
+from e2b_swebench.runner import _run_one
+from e2b_swebench.templates import (
+    TemplateSpec,
+    content_key,
+    ensure_template,
+    resolve_image,
+    template_name_from_spec,
+    template_ready,
+)
 
 
-class TemplateNameTests(unittest.TestCase):
-    def test_resources_are_part_of_template_name(self):
-        small = template_name("astropy__astropy-12907", 2, 4096)
-        large = template_name("astropy__astropy-12907", 8, 16384)
-        self.assertEqual(small, "swebench-astropy-astropy-12907-2c-4096m")
-        self.assertNotEqual(small, large)
+class _RegistryResponse(BytesIO):
+    def __init__(self, body=b"", headers=None):
+        super().__init__(body)
+        self.headers = headers or {}
+
+
+class TemplateIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.spec = TemplateSpec(
+            instance_id="astropy__astropy-12907",
+            source_image="example/image@sha256:" + "a" * 64,
+        )
+
+    @patch("e2b_swebench.templates._open_registry")
+    def test_resolves_docker_hub_tag_to_digest(self, open_registry):
+        open_registry.side_effect = [
+            _RegistryResponse(b'{"token":"registry-token"}'),
+            _RegistryResponse(headers={"Docker-Content-Digest": "sha256:" + "a" * 64}),
+        ]
+
+        self.assertEqual(
+            resolve_image("example/image:latest"),
+            "example/image@sha256:" + "a" * 64,
+        )
+
+    def test_content_key_and_alias_use_canonical_complete_spec(self):
+        self.assertEqual(
+            content_key(self.spec),
+            "88f24c7ae103d6e3c318f1dab434ce4c556f6b6f56f83ab4472da90bb9a65239",
+        )
+        self.assertEqual(content_key(self.spec), content_key(self.spec))
+
+        mutations = {
+            "digest": replace(
+                self.spec, source_image="example/image@sha256:" + "b" * 64
+            ),
+            "workdir": replace(self.spec, workdir="/other"),
+            "cpu": replace(self.spec, cpu_count=8),
+            "memory": replace(self.spec, memory_mb=8192),
+            "schema": replace(self.spec, construction_schema=2),
+            "architecture": replace(self.spec, architecture="arm64"),
+            "namespace": replace(self.spec, namespace="other"),
+        }
+        for field, changed_spec in mutations.items():
+            with self.subTest(field=field):
+                self.assertNotEqual(content_key(self.spec), content_key(changed_spec))
+                self.assertNotEqual(
+                    template_name_from_spec(self.spec),
+                    template_name_from_spec(changed_spec),
+                )
+
+    def test_alias_is_bounded_and_changes_with_content(self):
+        name = template_name_from_spec(
+            replace(self.spec, instance_id="owner__" + "very-long-repository-" * 8)
+        )
+        self.assertLessEqual(len(name), 63)
+        self.assertRegex(name, r"^[a-z0-9-]+$")
+
+    @patch("e2b_swebench.templates._wait_until_ready", return_value=True)
+    @patch("e2b_swebench.templates.template_ready")
+    @patch("e2b_swebench.templates.instance_image", return_value="example/image:latest")
+    @patch("e2b_swebench.templates.resolve_image", create=True)
+    @patch("e2b_swebench.templates.Template")
+    def test_resolves_image_before_content_alias_reuse_check(
+        self, template, resolve_image, image, ready, wait
+    ):
+        events = []
+        pinned_image = "example/image@sha256:" + "a" * 64
+        resolve_image.side_effect = lambda source: (
+            events.append("resolve") or pinned_image
+        )
+        ready.side_effect = lambda name: events.append(("ready", name)) or False
+
+        name, built = ensure_template({"instance_id": "task"})
+
+        self.assertEqual(name, "swebench-task-88f24c7ae103d6e3c318f1da")
+        self.assertTrue(built)
+        self.assertEqual(events[0], "resolve")
+        self.assertEqual(
+            {event[1] for event in events if isinstance(event, tuple)}, {name}
+        )
+        self.assertNotIn("swebench-task-4c-4096m", events)
+        template.return_value.from_image.assert_called_once_with(pinned_image)
 
     @patch("e2b_swebench.templates.Template")
     def test_alias_without_default_tag_is_not_ready(self, template):
@@ -35,23 +123,33 @@ class TemplateNameTests(unittest.TestCase):
     @patch("e2b_swebench.templates._wait_until_ready", return_value=True)
     @patch("e2b_swebench.templates.template_ready", return_value=False)
     @patch("e2b_swebench.templates.instance_image", return_value="example/image:latest")
+    @patch(
+        "e2b_swebench.templates.resolve_image",
+        return_value="example/image@sha256:" + "a" * 64,
+    )
     @patch("e2b_swebench.templates.Template")
-    def test_unspawnable_existing_alias_is_rebuilt(self, template, image, ready, wait):
+    def test_unspawnable_existing_alias_is_rebuilt(
+        self, template, resolve, image, ready, wait
+    ):
         name, built = ensure_template({"instance_id": "task"})
-        self.assertEqual(name, "swebench-task-4c-4096m")
+        self.assertEqual(name, "swebench-task-88f24c7ae103d6e3c318f1da")
         self.assertTrue(built)
         template.build.assert_called_once()
         wait.assert_called_once_with(name)
 
     @patch("e2b_swebench.templates.template_ready", side_effect=[False, True])
     @patch("e2b_swebench.templates.instance_image", return_value="example/image:latest")
+    @patch(
+        "e2b_swebench.templates.resolve_image",
+        return_value="example/image@sha256:" + "a" * 64,
+    )
     @patch("e2b_swebench.templates.Template")
     def test_internal_build_error_recovers_when_template_is_spawnable(
-        self, template, image, ready
+        self, template, resolve, image, ready
     ):
         template.build.side_effect = BuildException("internal error")
         name, built = ensure_template({"instance_id": "task"})
-        self.assertEqual(name, "swebench-task-4c-4096m")
+        self.assertEqual(name, "swebench-task-88f24c7ae103d6e3c318f1da")
         self.assertTrue(built)
         template.build.assert_called_once()
 
@@ -82,6 +180,30 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(result["peak_cpu_cores"], 3.0)
         self.assertEqual(result["peak_memory_used_mb"], 4096.0)
         self.assertEqual(result["peak_memory_working_set_mb"], 2048.0)
+
+
+class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    @patch("e2b_swebench.runner.run_instance_async", new_callable=AsyncMock)
+    @patch("e2b_swebench.templates.instance_image", return_value="example/image:latest")
+    @patch(
+        "e2b_swebench.templates.resolve_image",
+        return_value="example/image@sha256:" + "a" * 64,
+    )
+    async def test_runtime_selects_content_alias_without_building(
+        self, resolve, image, run_instance
+    ):
+        instance = {"instance_id": "task"}
+        prediction = {"instance_id": "task", "model_patch": ""}
+        run_instance.return_value = {"resolved": True}
+
+        verdict = await _run_one(asyncio.Semaphore(1), instance, prediction)
+
+        self.assertTrue(verdict["resolved"])
+        run_instance.assert_awaited_once_with(
+            instance,
+            prediction,
+            "swebench-task-88f24c7ae103d6e3c318f1da",
+        )
 
 
 class DriverTests(unittest.TestCase):

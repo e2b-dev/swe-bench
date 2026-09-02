@@ -24,7 +24,7 @@ async def _run_one(
             verdict = await run_instance_async(
                 instance,
                 prediction,
-                template_name(prediction["instance_id"], cpu_count, memory_mb),
+                template_name(instance, cpu_count, memory_mb),
                 **kw,
             )
         except Exception as e:  # noqa: BLE001 - one failure cannot sink the batch
