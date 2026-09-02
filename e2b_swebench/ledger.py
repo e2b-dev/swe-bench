@@ -2,7 +2,7 @@
 
 Tracks, per instance, whether its template built and whether the gold patch
 verifies. Saved to disk after every batch so a long run can be stopped and
-resumed across sessions (finish some tonight, continue tomorrow).
+resumed across sessions.
 
 verify categories:
   pass              - gold resolved; template is good
@@ -141,7 +141,7 @@ class Ledger:
     def update(self, iid: str, **fields) -> None:
         rec = self.data.setdefault(iid, {"instance_id": iid})
         rec.update(fields)
-        rec["updated_at"] = datetime.datetime.now(datetime.UTC).isoformat(
+        rec["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(
             timespec="seconds"
         )
 

@@ -12,6 +12,7 @@ from e2b_swebench.driver import (
     run_instance,
     run_instance_async,
 )
+from tests.offline import install_offline_guards
 
 _FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures/swebench-4.1.0-eval-commands.json").read_text()
@@ -24,6 +25,8 @@ index 1111111..2222222 100644
 -old
 +new
 """
+
+install_offline_guards()
 
 
 def _make_spec(case_name: str):

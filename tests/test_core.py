@@ -27,6 +27,9 @@ from e2b_swebench.templates import (
     template_ready,
 )
 from scripts import build_and_verify, run_eval
+from tests.offline import install_offline_guards
+
+install_offline_guards()
 
 
 class _RegistryResponse(BytesIO):
@@ -41,6 +44,10 @@ class TemplateIdentityTests(unittest.TestCase):
             instance_id="astropy__astropy-12907",
             source_image="example/image@sha256:" + "a" * 64,
         )
+
+    def test_unmocked_registry_access_is_rejected_by_the_test_suite(self):
+        with self.assertRaisesRegex(AssertionError, "network access is disabled"):
+            resolve_image("example/image:latest")
 
     @patch("e2b_swebench.templates._open_registry")
     def test_resolves_docker_hub_tag_to_digest(self, open_registry):
