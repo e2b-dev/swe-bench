@@ -23,7 +23,9 @@ from e2b_swebench import (
     gold_prediction,
     load_instances,
     quiet_logs,
+    resolve_template_specs_sync,
     select_per_repo,
+    template_identity,
 )
 from e2b_swebench.config import DEFAULT_CONCURRENCY, DEFAULT_CPU, DEFAULT_MEMORY_MB
 from e2b_swebench.ledger import Ledger, categorize_verdict
@@ -103,7 +105,23 @@ def main() -> int:
     if not selected:
         ap.error("pass one of --instances / --per-repo / --limit / --all")
 
-    todo = [i for i in selected if not ledger.is_done(i, args.cpu, args.memory_mb)]
+    specs = resolve_template_specs_sync(
+        [instances[i] for i in selected],
+        cpu_count=args.cpu,
+        memory_mb=args.memory_mb,
+        workers=args.workers,
+    )
+    identities = {iid: template_identity(specs[iid]) for iid in selected}
+    todo = [
+        i
+        for i in selected
+        if not ledger.is_done(
+            i,
+            args.cpu,
+            args.memory_mb,
+            identity=identities[i],
+        )
+    ]
     print(
         f"selected={len(selected)}  done={len(selected) - len(todo)}  todo={len(todo)}"
     )
@@ -123,6 +141,7 @@ def main() -> int:
             cpu_count=args.cpu,
             memory_mb=args.memory_mb,
             progress=True,
+            resolved_specs={iid: specs[iid] for iid in batch},
         )
         for iid, out in results.items():
             if isinstance(out, Exception):
@@ -133,14 +152,16 @@ def main() -> int:
                     verify=None,
                     cpu_count=args.cpu,
                     memory_mb=args.memory_mb,
+                    **identities[iid],
                 )
             else:
                 ledger.update(
                     iid,
                     build="ok",
-                    template=out[0],
+                    verify=None,
                     cpu_count=args.cpu,
                     memory_mb=args.memory_mb,
+                    **identities[iid],
                 )
         ledger.save()
 
@@ -154,11 +175,13 @@ def main() -> int:
                 concurrency=args.verify_concurrency,
                 cpu_count=args.cpu,
                 memory_mb=args.memory_mb,
+                template_specs={iid: specs[iid] for iid in built_ok},
             )
         )
         for v in verdicts:
             cat, detail = categorize_verdict(v)
-            ledger.update(v["instance_id"], verify=cat, **detail)
+            iid = v["instance_id"]
+            ledger.update(iid, verify=cat, **identities[iid], **detail)
         ledger.save()
 
         c = Counter(ledger.get(i).get("verify") for i in batch)
@@ -198,7 +221,14 @@ def main() -> int:
     print("===== session complete =====")
     print_summary(ledger)
     remaining = sum(
-        1 for i in selected if not ledger.is_done(i, args.cpu, args.memory_mb)
+        1
+        for i in selected
+        if not ledger.is_done(
+            i,
+            args.cpu,
+            args.memory_mb,
+            identity=identities[i],
+        )
     )
     print(
         f"\nremaining (not verified): {remaining}. Re-run the same command to continue."

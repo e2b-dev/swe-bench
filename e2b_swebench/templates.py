@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -73,6 +74,10 @@ class TemplateSpec:
             )
         if not isinstance(self.construction_schema, int):
             raise TypeError("construction_schema must be an integer")
+
+
+class ImmutableTemplateIdentityRequired(ValueError):
+    """Raised when a legacy call lacks inputs required for immutable identity."""
 
 
 def _open_registry(request: Request):
@@ -177,7 +182,7 @@ def template_name_from_spec(spec: TemplateSpec) -> str:
     return f"{TEMPLATE_PREFIX}{slug}-{suffix}"
 
 
-def template_spec(
+def resolve_template_spec(
     instance: dict,
     cpu_count: int = DEFAULT_CPU,
     memory_mb: int = DEFAULT_MEMORY_MB,
@@ -191,13 +196,86 @@ def template_spec(
     )
 
 
-def template_name(
+def template_spec(
+    instance: dict,
+    cpu_count: int = DEFAULT_CPU,
+    memory_mb: int = DEFAULT_MEMORY_MB,
+) -> TemplateSpec:
+    """Backward-compatible name for immutable spec resolution."""
+    return resolve_template_spec(instance, cpu_count, memory_mb)
+
+
+def template_identity(spec: TemplateSpec) -> dict[str, str]:
+    """Return the exact fields persisted wherever a template is reused."""
+    return {
+        "template": template_name_from_spec(spec),
+        "content_key": content_key(spec),
+        "source_image": spec.source_image,
+    }
+
+
+def immutable_template_name(
     instance: dict,
     cpu_count: int = DEFAULT_CPU,
     memory_mb: int = DEFAULT_MEMORY_MB,
 ) -> str:
     """Resolve an instance and derive its current immutable template alias."""
-    return template_name_from_spec(template_spec(instance, cpu_count, memory_mb))
+    return template_name_from_spec(
+        resolve_template_spec(instance, cpu_count, memory_mb)
+    )
+
+
+def template_name(
+    instance: dict | str,
+    cpu_count: int = DEFAULT_CPU,
+    memory_mb: int = DEFAULT_MEMORY_MB,
+) -> str:
+    """Compatibility boundary for the former instance-ID-only alias API.
+
+    A bare instance ID cannot identify the source image digest, so accepting the
+    old call would reintroduce mutable reuse. Callers with a complete instance
+    remain supported and legacy callers receive an intentional migration error.
+    """
+    if isinstance(instance, str):
+        raise ImmutableTemplateIdentityRequired(
+            "template_name(instance_id, ...) cannot produce an immutable content "
+            "identity; use resolve_template_spec(instance, ...) followed by "
+            "template_name_from_spec(spec), or immutable_template_name(instance, ...)"
+        )
+    return immutable_template_name(instance, cpu_count, memory_mb)
+
+
+def resolve_template_specs_sync(
+    instances: list[dict],
+    cpu_count: int = DEFAULT_CPU,
+    memory_mb: int = DEFAULT_MEMORY_MB,
+    workers: int = 8,
+) -> dict[str, TemplateSpec]:
+    """Resolve each unique instance once outside an asyncio execution loop."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    unique_instances = {instance["instance_id"]: instance for instance in instances}
+    sources = {
+        iid: instance_image(instance) for iid, instance in unique_instances.items()
+    }
+    unique_sources = dict.fromkeys(sources.values())
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        resolved_sources = dict(
+            zip(
+                unique_sources,
+                executor.map(resolve_image, unique_sources),
+                strict=True,
+            )
+        )
+    return {
+        iid: TemplateSpec(
+            instance_id=iid,
+            source_image=resolved_sources[source],
+            cpu_count=cpu_count,
+            memory_mb=memory_mb,
+        )
+        for iid, source in sources.items()
+    }
 
 
 def instance_image(instance: dict) -> str:
@@ -258,13 +336,20 @@ def ensure_template(
     Lazy build means your template count tracks what you actually evaluate:
     1 for the smoke test, N for an N-instance run.
     """
-    # Runs in ProcessPoolExecutor children too, which don't inherit the parent's
-    # logging config — quiet the per-request SDK/HTTP spam here so build logs stay readable.
+    spec = resolve_template_spec(instance, cpu_count, memory_mb)
+    return ensure_template_from_spec(spec, force=force, quiet=quiet)
+
+
+def ensure_template_from_spec(
+    spec: TemplateSpec,
+    force: bool = False,
+    quiet: bool = False,
+) -> tuple[str, bool]:
+    """Build or reuse exactly the already-resolved immutable spec."""
     from .logs import quiet_logs
 
     quiet_logs()
 
-    spec = template_spec(instance, cpu_count, memory_mb)
     name = template_name_from_spec(spec)
     if not force and template_ready(name):
         return name, False
@@ -276,8 +361,8 @@ def ensure_template(
             Template.build(
                 builder,
                 name,
-                cpu_count=cpu_count,
-                memory_mb=memory_mb,
+                cpu_count=spec.cpu_count,
+                memory_mb=spec.memory_mb,
                 skip_cache=force,
                 on_build_logs=None if quiet else default_build_logger(),
             )
@@ -304,6 +389,7 @@ def build_many(
     memory_mb: int = DEFAULT_MEMORY_MB,
     force: bool = False,
     progress: bool = True,
+    resolved_specs: Mapping[str, TemplateSpec] | None = None,
 ) -> dict:
     """Build templates for many instances in parallel. Returns
     {instance_id: (name, built) | Exception}.
@@ -332,15 +418,24 @@ def build_many(
     if workers <= 1:
         for i, inst in enumerate(instances_list, 1):
             try:
+                spec = (
+                    resolved_specs[inst["instance_id"]]
+                    if resolved_specs is not None
+                    else None
+                )
                 _record(
                     i,
                     inst["instance_id"],
-                    ensure_template(
-                        inst,
-                        cpu_count=cpu_count,
-                        memory_mb=memory_mb,
-                        force=force,
-                        quiet=True,
+                    (
+                        ensure_template_from_spec(spec, force=force, quiet=True)
+                        if spec is not None
+                        else ensure_template(
+                            inst,
+                            cpu_count=cpu_count,
+                            memory_mb=memory_mb,
+                            force=force,
+                            quiet=True,
+                        )
                     ),
                 )
             except Exception as e:  # noqa: BLE001
@@ -348,12 +443,17 @@ def build_many(
         return results
 
     with ProcessPoolExecutor(max_workers=workers) as ex:
-        futs = {
-            ex.submit(ensure_template, inst, cpu_count, memory_mb, force, True): inst[
-                "instance_id"
-            ]
-            for inst in instances_list
-        }
+        futs = {}
+        for inst in instances_list:
+            iid = inst["instance_id"]
+            spec = resolved_specs[iid] if resolved_specs is not None else None
+            if spec is not None:
+                future = ex.submit(ensure_template_from_spec, spec, force, True)
+            else:
+                future = ex.submit(
+                    ensure_template, inst, cpu_count, memory_mb, force, True
+                )
+            futs[future] = iid
         for i, fut in enumerate(as_completed(futs), 1):
             iid = futs[fut]
             try:

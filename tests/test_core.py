@@ -1,5 +1,8 @@
 import asyncio
+import json
+import sys
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from io import BytesIO
@@ -11,15 +14,19 @@ from e2b import BuildException, SandboxException
 from e2b_swebench.driver import _eval_script_preserving_image_setup
 from e2b_swebench.ledger import Ledger, categorize_verdict
 from e2b_swebench.metrics import summarize_metrics
-from e2b_swebench.runner import _run_one
+from e2b_swebench.runner import _run_one, evaluation_identity, run_many
 from e2b_swebench.templates import (
+    ImmutableTemplateIdentityRequired,
     TemplateSpec,
+    build_many,
     content_key,
     ensure_template,
     resolve_image,
+    template_identity,
     template_name_from_spec,
     template_ready,
 )
+from scripts import build_and_verify, run_eval
 
 
 class _RegistryResponse(BytesIO):
@@ -79,6 +86,33 @@ class TemplateIdentityTests(unittest.TestCase):
         )
         self.assertLessEqual(len(name), 63)
         self.assertRegex(name, r"^[a-z0-9-]+$")
+
+    def test_legacy_template_name_call_has_intentional_migration_error(self):
+        from e2b_swebench.templates import template_name
+
+        with self.assertRaisesRegex(
+            ImmutableTemplateIdentityRequired, "immutable content identity"
+        ):
+            template_name("astropy__astropy-12907")
+
+    @patch("e2b_swebench.templates.ensure_template")
+    @patch(
+        "e2b_swebench.templates.ensure_template_from_spec",
+        return_value=("content-alias", False),
+    )
+    def test_build_many_uses_pre_resolved_spec_without_reresolving(
+        self, ensure_from_spec, ensure_from_instance
+    ):
+        results = build_many(
+            [{"instance_id": self.spec.instance_id}],
+            workers=1,
+            progress=False,
+            resolved_specs={self.spec.instance_id: self.spec},
+        )
+
+        self.assertEqual(results, {self.spec.instance_id: ("content-alias", False)})
+        ensure_from_spec.assert_called_once_with(self.spec, force=False, quiet=True)
+        ensure_from_instance.assert_not_called()
 
     @patch("e2b_swebench.templates._wait_until_ready", return_value=True)
     @patch("e2b_swebench.templates.template_ready")
@@ -184,26 +218,267 @@ class MetricsTests(unittest.TestCase):
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
     @patch("e2b_swebench.runner.run_instance_async", new_callable=AsyncMock)
-    @patch("e2b_swebench.templates.instance_image", return_value="example/image:latest")
-    @patch(
-        "e2b_swebench.templates.resolve_image",
-        return_value="example/image@sha256:" + "a" * 64,
-    )
-    async def test_runtime_selects_content_alias_without_building(
-        self, resolve, image, run_instance
-    ):
+    async def test_runtime_selects_content_alias_without_building(self, run_instance):
         instance = {"instance_id": "task"}
         prediction = {"instance_id": "task", "model_patch": ""}
+        spec = TemplateSpec(
+            instance_id="task",
+            source_image="example/image@sha256:" + "a" * 64,
+        )
         run_instance.return_value = {"resolved": True}
 
-        verdict = await _run_one(asyncio.Semaphore(1), instance, prediction)
+        verdict = await _run_one(asyncio.Semaphore(1), instance, prediction, spec)
 
         self.assertTrue(verdict["resolved"])
+        self.assertEqual(verdict["content_key"], content_key(spec))
+        self.assertEqual(verdict["source_image"], spec.source_image)
+        self.assertEqual(len(verdict["run_key"]), 64)
         run_instance.assert_awaited_once_with(
             instance,
             prediction,
             "swebench-task-88f24c7ae103d6e3c318f1da",
         )
+
+    @patch("e2b_swebench.runner.run_instance_async", new_callable=AsyncMock)
+    @patch("e2b_swebench.runner.resolve_image")
+    @patch("e2b_swebench.runner.instance_image")
+    async def test_registry_resolution_does_not_block_event_loop(
+        self, instance_source, resolve_image, run_instance
+    ):
+        release = threading.Event()
+        observed_release = []
+        pinned_image = "example/image@sha256:" + "a" * 64
+
+        def blocking_image(*args, **kwargs):
+            observed_release.append(release.wait(timeout=0.2))
+            return pinned_image
+
+        instance_source.return_value = "example/image:latest"
+        resolve_image.side_effect = blocking_image
+        run_instance.side_effect = [
+            {"resolved": True},
+            {"resolved": True},
+            {"resolved": True},
+        ]
+
+        async def release_from_loop():
+            await asyncio.sleep(0.01)
+            release.set()
+
+        instances = {
+            "task": {"instance_id": "task"},
+            "other": {"instance_id": "other"},
+        }
+        predictions = [
+            {"instance_id": "task", "model_patch": ""},
+            {"instance_id": "other", "model_patch": ""},
+            {"instance_id": "task", "model_patch": ""},
+        ]
+        verdicts, _ = await asyncio.gather(
+            run_many(instances, predictions),
+            release_from_loop(),
+        )
+
+        self.assertEqual(len(verdicts), 3)
+        self.assertTrue(all(verdict["resolved"] for verdict in verdicts))
+        self.assertEqual(observed_release, [True])
+
+
+class ResumeIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.instance = {"instance_id": "task"}
+        self.prediction = {"instance_id": "task", "model_patch": "patch"}
+        self.spec = TemplateSpec(
+            instance_id="task",
+            source_image="example/image@sha256:" + "a" * 64,
+        )
+
+    def test_resume_requires_every_current_run_identity_field(self):
+        identity = evaluation_identity(self.spec, self.instance, self.prediction)
+        verdict = {"instance_id": "task", "resolved": True, **identity}
+        self.assertTrue(run_eval._matches_run_identity(verdict, identity))
+
+        for field in identity:
+            with self.subTest(field=field):
+                stale = dict(verdict)
+                stale[field] = "stale"
+                self.assertFalse(run_eval._matches_run_identity(stale, identity))
+
+        legacy = {"instance_id": "task", "resolved": True}
+        self.assertFalse(run_eval._matches_run_identity(legacy, identity))
+
+    def test_build_ledger_legacy_pass_is_reprocessed_with_current_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = f"{directory}/ledger.json"
+            ledger = Ledger(ledger_path)
+            ledger.update(
+                "task",
+                build="ok",
+                verify="pass",
+                template="swebench-task-4c-4096m",
+                cpu_count=4,
+                memory_mb=4096,
+            )
+            ledger.save()
+
+            current_name = "swebench-task-88f24c7ae103d6e3c318f1da"
+            verdict = {"instance_id": "task", "resolved": True}
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "build_and_verify.py",
+                        "--instances",
+                        "task",
+                        "--ledger",
+                        ledger_path,
+                    ],
+                ),
+                patch.object(
+                    build_and_verify,
+                    "load_instances",
+                    return_value={"task": self.instance},
+                ),
+                patch.object(
+                    build_and_verify,
+                    "gold_prediction",
+                    return_value=self.prediction,
+                ),
+                patch.object(
+                    build_and_verify,
+                    "resolve_template_specs_sync",
+                    return_value={"task": self.spec},
+                    create=True,
+                ),
+                patch.object(
+                    build_and_verify,
+                    "build_many",
+                    return_value={"task": (current_name, False)},
+                ) as build_many_mock,
+                patch.object(
+                    build_and_verify,
+                    "run_many",
+                    new=AsyncMock(return_value=[verdict]),
+                ),
+                patch("builtins.print"),
+            ):
+                self.assertEqual(build_and_verify.main(), 0)
+
+            build_many_mock.assert_called_once()
+            record = Ledger(ledger_path).get("task")
+            self.assertEqual(record["template"], current_name)
+            self.assertEqual(record["content_key"], content_key(self.spec))
+            self.assertEqual(record["source_image"], self.spec.source_image)
+
+    def test_rebuild_clears_stale_verification_before_current_verify(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = f"{directory}/ledger.json"
+            ledger = Ledger(ledger_path)
+            ledger.update(
+                "task",
+                build="ok",
+                verify="pass",
+                template="swebench-task-4c-4096m",
+                cpu_count=4,
+                memory_mb=4096,
+            )
+            ledger.save()
+
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "build_and_verify.py",
+                        "--instances",
+                        "task",
+                        "--ledger",
+                        ledger_path,
+                    ],
+                ),
+                patch.object(
+                    build_and_verify,
+                    "load_instances",
+                    return_value={"task": self.instance},
+                ),
+                patch.object(
+                    build_and_verify,
+                    "gold_prediction",
+                    return_value=self.prediction,
+                ),
+                patch.object(
+                    build_and_verify,
+                    "resolve_template_specs_sync",
+                    return_value={"task": self.spec},
+                ),
+                patch.object(
+                    build_and_verify,
+                    "build_many",
+                    return_value={
+                        "task": (
+                            "swebench-task-88f24c7ae103d6e3c318f1da",
+                            False,
+                        )
+                    },
+                ),
+                patch.object(
+                    build_and_verify,
+                    "run_many",
+                    new=AsyncMock(side_effect=RuntimeError("stop after build")),
+                ),
+                patch("builtins.print"),
+                self.assertRaisesRegex(RuntimeError, "stop after build"),
+            ):
+                build_and_verify.main()
+
+            record = Ledger(ledger_path).get("task")
+            self.assertIsNone(record["verify"])
+            self.assertEqual(record["content_key"], content_key(self.spec))
+
+    def test_run_eval_resume_reprocesses_legacy_verdict_and_writes_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            verdicts_path = f"{directory}/verdicts.jsonl"
+            with open(verdicts_path, "w") as f:
+                f.write(json.dumps({"instance_id": "task", "resolved": True}) + "\n")
+
+            run_many_mock = AsyncMock(return_value=[])
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "run_eval.py",
+                        "--gold",
+                        "--instances",
+                        "task",
+                        "--resume",
+                        "--out",
+                        directory,
+                    ],
+                ),
+                patch.object(run_eval, "quiet_logs"),
+                patch.object(
+                    run_eval, "load_instances", return_value={"task": self.instance}
+                ),
+                patch.object(run_eval, "gold_prediction", return_value=self.prediction),
+                patch.object(
+                    run_eval,
+                    "resolve_template_specs",
+                    new=AsyncMock(return_value={"task": self.spec}),
+                    create=True,
+                ),
+                patch.object(run_eval, "run_many", new=run_many_mock),
+                patch("builtins.print"),
+            ):
+                self.assertEqual(run_eval.main(), 0)
+
+            self.assertEqual(run_many_mock.await_args.args[1], [self.prediction])
+            with open(f"{directory}/run_manifest.json") as f:
+                manifest = json.load(f)
+            self.assertEqual(
+                manifest["runs"]["task"]["content_key"], content_key(self.spec)
+            )
 
 
 class DriverTests(unittest.TestCase):
@@ -227,9 +502,30 @@ class LedgerTests(unittest.TestCase):
     def test_done_is_resource_profile_specific(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger = Ledger(f"{directory}/ledger.json")
-            ledger.update("task", verify="pass", cpu_count=4, memory_mb=8192)
-            self.assertTrue(ledger.is_done("task", 4, 8192))
-            self.assertFalse(ledger.is_done("task", 2, 4096))
+            spec = TemplateSpec(
+                instance_id="task",
+                source_image="example/image@sha256:" + "a" * 64,
+                cpu_count=4,
+                memory_mb=8192,
+            )
+            identity = template_identity(spec)
+            ledger.update(
+                "task",
+                verify="pass",
+                cpu_count=4,
+                memory_mb=8192,
+                **identity,
+            )
+            self.assertTrue(ledger.is_done("task", 4, 8192, identity=identity))
+            self.assertFalse(ledger.is_done("task", 2, 4096, identity=identity))
+            self.assertFalse(ledger.is_done("task", 4, 8192))
+            changed_identity = template_identity(
+                replace(
+                    spec,
+                    source_image="example/image@sha256:" + "b" * 64,
+                )
+            )
+            self.assertFalse(ledger.is_done("task", 4, 8192, identity=changed_identity))
 
     def test_arbitrary_p2p_failure_is_not_an_artifact(self):
         verdict = {

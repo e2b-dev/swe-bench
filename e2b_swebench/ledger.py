@@ -20,9 +20,10 @@ import datetime
 import json
 import os
 from collections import Counter
-from collections.abc import Sized
+from collections.abc import Mapping, Sized
 
 DONE = ("pass", "grader_artifact", "ordering_artifact")
+_IDENTITY_FIELDS = ("template", "content_key", "source_image")
 
 # These exceptions were reproduced under the final evaluator and independently
 # audited. Do not generalize all PASS_TO_PASS-only failures into artifacts: a
@@ -119,9 +120,18 @@ class Ledger:
         return self.get(iid).get("verify")
 
     def is_done(
-        self, iid: str, cpu_count: int | None = None, memory_mb: int | None = None
+        self,
+        iid: str,
+        cpu_count: int | None = None,
+        memory_mb: int | None = None,
+        *,
+        identity: Mapping[str, str] | None = None,
     ) -> bool:
         record = self.get(iid)
+        if identity is None or any(field not in identity for field in _IDENTITY_FIELDS):
+            return False
+        if any(record.get(field) != identity[field] for field in _IDENTITY_FIELDS):
+            return False
         if cpu_count is not None and record.get("cpu_count") != cpu_count:
             return False
         if memory_mb is not None and record.get("memory_mb") != memory_mb:

@@ -2,34 +2,99 @@
 stay within the configured E2B concurrency cap."""
 
 import asyncio
+import hashlib
 import json
 from collections import Counter
 
 from .config import DEFAULT_CONCURRENCY, DEFAULT_CPU, DEFAULT_MEMORY_MB
 from .driver import run_instance_async
-from .templates import template_name
+from .templates import (
+    TemplateSpec,
+    content_key,
+    instance_image,
+    resolve_image,
+    template_name_from_spec,
+)
+
+_RESOLUTION_CONCURRENCY = 8
+_EVALUATION_SCHEMA = 1
+
+
+def _canonical_hash(value: object) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def evaluation_identity(
+    spec: TemplateSpec, instance: dict, prediction: dict
+) -> dict[str, str | int]:
+    """Return the complete deterministic identity for one evaluation route."""
+    identity = {
+        "evaluation_schema": _EVALUATION_SCHEMA,
+        "template": template_name_from_spec(spec),
+        "content_key": content_key(spec),
+        "source_image": spec.source_image,
+        "instance_key": _canonical_hash(instance),
+        "prediction_key": _canonical_hash(prediction),
+    }
+    identity["run_key"] = _canonical_hash(identity)
+    return identity
+
+
+async def resolve_template_specs(
+    instances: dict[str, dict],
+    predictions: list[dict],
+    cpu_count: int = DEFAULT_CPU,
+    memory_mb: int = DEFAULT_MEMORY_MB,
+    concurrency: int = _RESOLUTION_CONCURRENCY,
+) -> dict[str, TemplateSpec]:
+    """Resolve each selected instance once on bounded worker threads."""
+    selected_ids = dict.fromkeys(
+        prediction["instance_id"] for prediction in predictions
+    )
+    sources = {iid: instance_image(instances[iid]) for iid in selected_ids}
+    unique_sources = dict.fromkeys(sources.values())
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def resolve_one(source: str) -> tuple[str, str]:
+        async with semaphore:
+            return source, await asyncio.to_thread(resolve_image, source)
+
+    resolved_sources = dict(
+        await asyncio.gather(*(resolve_one(source) for source in unique_sources))
+    )
+    return {
+        iid: TemplateSpec(
+            instance_id=iid,
+            source_image=resolved_sources[source],
+            cpu_count=cpu_count,
+            memory_mb=memory_mb,
+        )
+        for iid, source in sources.items()
+    }
 
 
 async def _run_one(
     sem: asyncio.Semaphore,
     instance: dict,
     prediction: dict,
+    spec: TemplateSpec,
     result_path: str | None = None,
-    cpu_count: int = DEFAULT_CPU,
-    memory_mb: int = DEFAULT_MEMORY_MB,
     **kw,
 ) -> dict:
+    identity = evaluation_identity(spec, instance, prediction)
     async with sem:
         try:
             verdict = await run_instance_async(
                 instance,
                 prediction,
-                template_name(instance, cpu_count, memory_mb),
+                str(identity["template"]),
                 **kw,
             )
         except Exception as e:  # noqa: BLE001 - one failure cannot sink the batch
             verdict = {"resolved": False, "error": repr(e)}
         verdict["instance_id"] = prediction["instance_id"]
+        verdict.update(identity)
         # Append each verdict as it completes so a multi-hour run is crash-safe
         # (asyncio has no preemption mid-write, so concurrent appends are atomic).
         if result_path:
@@ -45,20 +110,28 @@ async def run_many(
     result_path: str | None = None,
     cpu_count: int = DEFAULT_CPU,
     memory_mb: int = DEFAULT_MEMORY_MB,
+    template_specs: dict[str, TemplateSpec] | None = None,
     **kw,
 ) -> list[dict]:
     """Run all predictions concurrently. Assumes templates already exist
     (build them with scripts/build_templates.py first). If result_path is given,
     each verdict is appended to it as it completes (for resume/crash safety)."""
+    if template_specs is None:
+        template_specs = await resolve_template_specs(
+            instances,
+            predictions,
+            cpu_count=cpu_count,
+            memory_mb=memory_mb,
+        )
+
     sem = asyncio.Semaphore(concurrency)
     tasks = [
         _run_one(
             sem,
             instances[p["instance_id"]],
             p,
+            template_specs[p["instance_id"]],
             result_path=result_path,
-            cpu_count=cpu_count,
-            memory_mb=memory_mb,
             **kw,
         )
         for p in predictions

@@ -33,13 +33,14 @@ SWE-bench publishes a prebuilt Docker image *per instance* on Docker Hub:
 already has the repo checked out at `base_commit` in `/testbed` and a conda env
 `testbed` with the project installed.
 
-We build **one E2B template per instance, `FROM` that image**. A sandbox then
-spawns ready-to-eval, with everything on the sandbox's fast **local disk** — no
-per-run clone or install. Builds run server-side on E2B (**no local Docker**).
+We resolve the published image tag to its current OCI digest, then build **one
+E2B template per instance, `FROM repository@sha256:...`**. A sandbox then spawns
+ready-to-eval, with everything on the sandbox's fast **local disk** — no per-run
+clone or install. Builds run server-side on E2B (**no local Docker**).
 
 ```
 SWE-bench image (Docker Hub)        E2B template (per instance)      E2B sandbox (per run)
-sweb.eval.x86_64.<id>        ──►     swebench-<id>            ──►      /testbed @ base_commit
+sweb.eval.x86_64.<id>@sha256 ──►     swebench-<id>-<key>      ──►      /testbed @ base_commit
   /testbed @ base_commit             (FROM the image)                 conda env "testbed" ready
   conda env "testbed"
 ```
@@ -82,6 +83,27 @@ test still passes.**
   warning filters. So we **don't silently hack around it** — the pipeline classifies
   these distinctly and reports them, kept separate from genuine failures. (Recovering
   them means pinning older image deps, which diverges from the published image; out of scope.)
+
+### Immutable template API
+
+Template reuse is keyed by a canonical SHA-256 content identity covering the
+digest-pinned source image, `/testbed` workdir, architecture, namespace, CPU,
+memory, and construction schema. Use the explicit two-step API when selecting a
+template programmatically:
+
+```python
+from e2b_swebench import resolve_template_spec, template_name_from_spec
+
+spec = resolve_template_spec(instance, cpu_count=4, memory_mb=4096)
+name = template_name_from_spec(spec)
+```
+
+`immutable_template_name(instance, ...)` provides the equivalent one-call path.
+The compatibility `template_name(...)` entry point accepts a complete instance,
+but intentionally rejects a bare instance ID because an ID cannot determine the
+current image digest. Build and evaluation resume records store the full content
+key and source reference; legacy or stale records never satisfy the current
+identity check.
 
 ---
 
@@ -252,8 +274,9 @@ Notes:
 
 | file | written by | purpose |
 | --- | --- | --- |
-| `results/ledger.json` | build_and_verify | per-instance build+verify state; **resume source of truth** |
-| `results/verdicts.jsonl` | run_eval | one verdict per instance as it completes; resume source |
+| `results/ledger.json` | build_and_verify | per-instance build+verify state bound to template content identity; **resume source of truth** |
+| `results/run_manifest.json` | run_eval | deterministic template, instance, and prediction identity for the selected run |
+| `results/verdicts.jsonl` | run_eval | identity-bound verdicts as they complete; resume source |
 | `results/report.json` | run_eval | summary + all verdicts |
 | `results/predictions.jsonl` | run_eval | the predictions that were scored |
 
@@ -265,7 +288,7 @@ Notes:
 e2b_swebench/
   config.py      dataset, image namespace, resources, timeouts, concurrency
   dataset.py     load instances, parse tests, gold/empty predictions, select_per_repo
-  templates.py   template_name, instance_image, ensure_template, build_many (process pool)
+  templates.py   immutable template specs, names, identities, builds (process pool)
   driver.py      run_instance / run_instance_async: write patch → eval.sh → grade
   runner.py      run_many (concurrent, resumable) + summarize
   ledger.py      Ledger + categorize_verdict (pass / ordering_artifact / fail / error)
@@ -286,4 +309,3 @@ scripts/
   per-repo parser), never a hand-rolled regex.
 - Parallel builds use **processes** — the E2B SDK shares one HTTP/2 connection, so
   thread-based parallelism collides (`invalid_new_stream_id`).
-  
