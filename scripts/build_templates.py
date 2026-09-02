@@ -1,14 +1,14 @@
 #!/usr/bin/env python
-"""Pre-build E2B templates (Strategy A) for a set of instances.
+"""Pre-build immutable E2B templates for a set of instances.
 
 Build is server-side on E2B (no local Docker) and idempotent: existing
 templates are skipped unless --force. Builds run in parallel PROCESSES (one
 E2B connection each — threads share an HTTP/2 connection and collide).
 
-    python scripts/build_templates.py --per-repo 1            # one per repo (~12)
+    python scripts/build_templates.py --per-repo 1            # one per repository
     python scripts/build_templates.py --limit 20
     python scripts/build_templates.py --instances astropy__astropy-12907,sympy__sympy-20438
-    python scripts/build_templates.py --all --workers 8       # all 500
+    python scripts/build_templates.py --all --workers 8       # selected dataset
 """
 
 import argparse

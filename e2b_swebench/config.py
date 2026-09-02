@@ -49,8 +49,6 @@ SANDBOX_TIMEOUT = int(
 CMD_TIMEOUT = int(os.environ.get("SWEBENCH_CMD_TIMEOUT", "1800"))  # the eval.sh run
 BUILD_RECOVERY_TIMEOUT = int(os.environ.get("SWEBENCH_BUILD_RECOVERY_TIMEOUT", "120"))
 
-# --- concurrency: this account permits up to 100 concurrent sandboxes. The
-# driver retries Sandbox.create on 429, so short-lived account-wide contention
-# does not invalidate a task. Override with SWEBENCH_CONCURRENCY when a provider
-# or another workload needs a lower cap. ---
+# --- concurrency: choose a value within the limits of the E2B team running the
+# evaluation. The driver retries Sandbox.create on transient rate limits. ---
 DEFAULT_CONCURRENCY = int(os.environ.get("SWEBENCH_CONCURRENCY", "100"))

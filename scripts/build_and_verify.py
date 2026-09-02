@@ -3,12 +3,12 @@
 
 For each batch: build the templates (parallel processes), then gold-verify each
 built template (the gold patch must resolve). Every instance's outcome is
-recorded in a ledger that is saved after each batch, so the full 500 can be done
-across sessions — stop tonight, re-run the same command tomorrow to continue.
+recorded in a ledger that is saved after each batch, so a dataset can be
+processed across multiple sessions.
 
     python scripts/build_and_verify.py --status                       # progress so far
     python scripts/build_and_verify.py --all --batch-size 25          # churn all (resumable)
-    python scripts/build_and_verify.py --all --batch-size 25 --max-batches 4   # a few tonight
+    python scripts/build_and_verify.py --all --batch-size 25 --max-batches 4
     python scripts/build_and_verify.py --all --batch-size 25 --status # then check
 
 Resume is automatic: instances already pass or have an audited known artifact are skipped.
@@ -76,7 +76,7 @@ def main() -> int:
         "--verify-concurrency",
         type=int,
         default=DEFAULT_CONCURRENCY,
-        help="concurrent verify sandboxes (keep below your E2B account cap)",
+        help="concurrent verify sandboxes (keep within your E2B team limits)",
     )
     ap.add_argument("--cpu", type=int, default=DEFAULT_CPU)
     ap.add_argument("--memory-mb", type=int, default=DEFAULT_MEMORY_MB)

@@ -1,4 +1,4 @@
-"""Strategy A: one E2B template per instance, built FROM the prebuilt
+"""Build one E2B template per instance from the prebuilt
 swebench/sweb.eval.x86_64.<instance_id> Docker Hub image.
 
 The image already has /testbed checked out at base_commit and the conda env

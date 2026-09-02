@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""POC sanity check on a SINGLE instance — run this before anything else.
+"""Live end-to-end validation on one instance.
 
-Proves the whole Strategy-A path works end to end:
+Proves the immutable per-instance Template path works end to end:
   1. build an E2B template FROM the prebuilt image (lazy)
   2. spawn it; confirm /testbed is at base_commit and the conda env activates
   3. GOLD patch  -> must resolve True   (harness round-trips)

@@ -1,5 +1,4 @@
-"""Run the SWE-bench benchmark on E2B sandboxes (Strategy A: one E2B template
-per instance, built FROM the prebuilt swebench/sweb.eval.x86_64.* Docker image).
+"""Run SWE-bench with one immutable E2B template per instance.
 
 The swebench package supplies all the grading logic (Docker-free); E2B only
 replaces the per-instance *execution environment*.
