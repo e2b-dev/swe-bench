@@ -1,6 +1,6 @@
 .venv/
 __pycache__/
-*.pyc
+*.py[cod]
 .e2b/
 e2b.toml
 predictions*.jsonl
@@ -9,11 +9,35 @@ logs/
 results/
 _introspect*.py
 .env
+.env.*
+!.env.example
+.envrc
+.direnv/
+.cache/
+.python-version
 
-# python build artifacts
+# Generated benchmark inputs and local checkouts
+datasets/
+checkouts/
+worktrees/
+
+# Python build and test artifacts
 *.egg-info/
 build/
 dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.DS_Store
+.idea/
+.vscode/
 
-# local Claude Code settings
+# Local agent settings
 .claude/
+.codex/
+.agents/

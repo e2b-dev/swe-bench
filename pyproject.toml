@@ -1,17 +1,49 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "e2b-swebench"
 version = "0.1.0"
-description = "Run the SWE-bench benchmark on E2B sandboxes (Strategy A: per-instance templates)"
-requires-python = ">=3.10"
+description = "Run SWE-bench evaluations in E2B sandboxes"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "E2B" }]
+keywords = ["benchmark", "e2b", "sandbox", "swe-bench"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
-    "e2b>=2.26.0",
-    "swebench>=4.1.0",
-    "datasets>=3.0.0",
+    "datasets==5.0.1",
+    "e2b==2.39.1",
+    "swebench==4.1.0",
+    "tomli==2.2.1; python_version < '3.11'",
 ]
 
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+[project.urls]
+Homepage = "https://github.com/e2b-dev/swe-bench"
+Repository = "https://github.com/e2b-dev/swe-bench"
+Issues = "https://github.com/e2b-dev/swe-bench/issues"
+
+[dependency-groups]
+dev = [
+    "build==1.3.0",
+    "ruff==0.12.12",
+    "setuptools==80.9.0",
+    "twine==6.2.0",
+]
 
 [tool.setuptools]
 packages = ["e2b_swebench"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

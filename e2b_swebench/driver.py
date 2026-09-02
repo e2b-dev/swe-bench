@@ -22,6 +22,7 @@ from swebench.harness.grading import get_eval_report
 from swebench.harness.test_spec.test_spec import make_test_spec
 
 from .config import ARCH, CMD_TIMEOUT, NAMESPACE, SANDBOX_TIMEOUT
+from .metrics import summarize_metrics
 
 # Sandbox creation is the only call that can hit the account's concurrent-sandbox
 # cap (RateLimitException / 429). Our semaphore keeps us under the cap, but build
@@ -31,7 +32,8 @@ _RL_RETRIES = 8
 
 
 def _rl_backoff(attempt: int) -> float:
-    return min(5 * (2 ** attempt), 60) + random.uniform(0, 2)
+    return min(5 * (2**attempt), 60) + random.uniform(0, 2)
+
 
 # Same order/commands the native harness uses to apply a prediction patch.
 GIT_APPLY_CMDS = [
@@ -45,22 +47,18 @@ GIT_APPLY_CMDS = [
 # print results to stderr. Reading from a file also survives a non-zero exit.
 _EVAL_CMD = "/bin/bash /eval.sh > /tmp/test_output.txt 2>&1"
 
+_RESOURCE_EXHAUSTED = re.compile(
+    r"(^|\n).*\b(killed|out of memory|oom-kill|memoryerror)\b", re.IGNORECASE
+)
+
 
 def _detect_collection_error(output: str) -> bool:
-    """A pytest *collection* error (the test module fails to import) — almost always
-    an environment/image issue, not a model/template defect. Canonical example:
-    SWE-bench ':latest' images now ship setuptools 68, whose vendored distutils
-    emits a DeprecationWarning that astropy's (programmatic) warnings-as-errors
-    turns into a collection error. We surface these transparently rather than
-    suppressing them (env/CLI warning filters can't override astropy's config, and
-    patching it would diverge from the image more than the warning itself)."""
+    """Detect pytest import/collection failures for explicit ledger reporting."""
     o = output.lower()
     return "errors during collection" in o or "error collecting" in o
 
 
-# A drifted-dependency warning promoted to a *test* error (pytest 'E <Warning>:' line) —
-# e.g. astropy's warnings-as-errors tripping on pytest's nose-deprecation. Same upstream
-# image-drift family as a collection error, just at test-run time instead of import time.
+# A dependency warning promoted to a test error (pytest ``E <Warning>:`` line).
 _WARNING_E_LINE = re.compile(
     r"^\s*E\s+.*?(DeprecationWarning|PendingDeprecationWarning|FutureWarning|"
     r"PytestRemovedIn\d+Warning|PytestDeprecationWarning|PytestUnraisableExceptionWarning)",
@@ -69,7 +67,64 @@ _WARNING_E_LINE = re.compile(
 
 
 def _detect_warning_error(output: str) -> bool:
-    return bool(_WARNING_E_LINE.search(output)) or "is using nose-specific method" in output
+    return (
+        bool(_WARNING_E_LINE.search(output))
+        or "is using nose-specific method" in output
+    )
+
+
+def _is_whole_repository_restore(command: str, base_commit: str) -> bool:
+    """Return whether one generated shell command restores the whole repo."""
+    tokens = command.split()
+    return tokens in (
+        ["git", "checkout", base_commit],
+        ["git", "reset", "--hard", base_commit],
+    )
+
+
+def _eval_script_preserving_image_setup(test_spec, instance: dict) -> str:
+    """Keep the SWE-bench image's setup commit active during evaluation.
+
+    Per-instance images commit repo-specific test-output and dependency fixes on
+    top of ``base_commit``. The generated eval script checks out ``base_commit``
+    before and after the test patch, which drops those fixes. That can make a
+    passing pytest run ungradeable (compact ``.`` output instead of the test ID),
+    as in sphinx-doc__sphinx-8595. Every run uses a fresh sandbox, so cleanup is
+    unnecessary. Replacing only complete-repository restore commands preserves
+    path-specific held-out-test checkout commands, the candidate working-tree
+    patch, and the generated test sequence.
+    """
+    commands = test_spec.eval_script_list
+    serialized_commands = "\n".join(commands) + "\n"
+    script = test_spec.eval_script
+    if not script.endswith(serialized_commands):
+        raise ValueError("unsupported SWE-bench TestSpec eval_script serialization")
+
+    rewritten_commands = [
+        (
+            ": # preserve SWE-bench image setup commit"
+            if _is_whole_repository_restore(command, instance["base_commit"])
+            else command
+        )
+        for command in commands
+    ]
+    return script[: -len(serialized_commands)] + "\n".join(rewritten_commands) + "\n"
+
+
+def _attach_execution_stats(verdict: dict, sbx, started_at: float) -> None:
+    verdict["runtime_seconds"] = round(time.monotonic() - started_at, 2)
+    try:
+        verdict["metrics"] = summarize_metrics(sbx.get_metrics())
+    except Exception as exc:  # noqa: BLE001 - metrics cannot invalidate a result
+        verdict["metrics"] = {"samples": 0, "error": repr(exc)}
+
+
+async def _attach_execution_stats_async(verdict: dict, sbx, started_at: float) -> None:
+    verdict["runtime_seconds"] = round(time.monotonic() - started_at, 2)
+    try:
+        verdict["metrics"] = summarize_metrics(await sbx.get_metrics())
+    except Exception as exc:  # noqa: BLE001 - metrics cannot invalidate a result
+        verdict["metrics"] = {"samples": 0, "error": repr(exc)}
 
 
 def _create_sandbox(template: str, timeout: int):
@@ -118,6 +173,7 @@ def run_instance(
     dict ({'resolved': bool, 'patch_successfully_applied': bool, ...})."""
     ts = make_test_spec(instance, namespace=NAMESPACE, arch=ARCH)
     patch = prediction.get("model_patch") or ""
+    started_at = time.monotonic()
     sbx = _create_sandbox(template, sandbox_timeout)
     try:
         # 1. apply the prediction patch (empty patch = no-op, still graded)
@@ -127,7 +183,10 @@ def run_instance(
             for cmd in GIT_APPLY_CMDS:
                 try:
                     res = sbx.commands.run(
-                        f"{cmd} /tmp/patch.diff", cwd="/testbed", user="root", timeout=300
+                        f"{cmd} /tmp/patch.diff",
+                        cwd="/testbed",
+                        user="root",
+                        timeout=300,
                     )
                     if res.exit_code == 0:
                         applied = True
@@ -143,9 +202,13 @@ def run_instance(
             }
 
         # 2. run eval.sh (it applies the gold test_patch + runs the repo's tests)
-        sbx.files.write("/eval.sh", ts.eval_script, user="root")
+        sbx.files.write(
+            "/eval.sh", _eval_script_preserving_image_setup(ts, instance), user="root"
+        )
         try:
-            sbx.commands.run(_EVAL_CMD, cwd="/testbed", user="root", timeout=cmd_timeout)
+            sbx.commands.run(
+                _EVAL_CMD, cwd="/testbed", user="root", timeout=cmd_timeout
+            )
         except CommandExitException:
             pass  # non-zero exit is normal when tests fail; we grade from the log
         output = sbx.files.read("/tmp/test_output.txt", user="root")
@@ -154,6 +217,8 @@ def run_instance(
         verdict = _grade(ts, prediction, output)
         verdict["collection_error"] = _detect_collection_error(output)
         verdict["warning_error"] = _detect_warning_error(output)
+        verdict["resource_exhausted"] = bool(_RESOURCE_EXHAUSTED.search(output))
+        _attach_execution_stats(verdict, sbx, started_at)
         if keep_output:
             verdict["_output"] = output
         return verdict
@@ -172,6 +237,7 @@ async def run_instance_async(
     """Async mirror of run_instance, for concurrent runs via run_many()."""
     ts = make_test_spec(instance, namespace=NAMESPACE, arch=ARCH)
     patch = prediction.get("model_patch") or ""
+    started_at = time.monotonic()
     sbx = await _create_sandbox_async(template, sandbox_timeout)
     try:
         applied = not patch.strip()
@@ -180,7 +246,10 @@ async def run_instance_async(
             for cmd in GIT_APPLY_CMDS:
                 try:
                     res = await sbx.commands.run(
-                        f"{cmd} /tmp/patch.diff", cwd="/testbed", user="root", timeout=300
+                        f"{cmd} /tmp/patch.diff",
+                        cwd="/testbed",
+                        user="root",
+                        timeout=300,
                     )
                     if res.exit_code == 0:
                         applied = True
@@ -195,9 +264,13 @@ async def run_instance_async(
                 "error": "patch_apply_failed",
             }
 
-        await sbx.files.write("/eval.sh", ts.eval_script, user="root")
+        await sbx.files.write(
+            "/eval.sh", _eval_script_preserving_image_setup(ts, instance), user="root"
+        )
         try:
-            await sbx.commands.run(_EVAL_CMD, cwd="/testbed", user="root", timeout=cmd_timeout)
+            await sbx.commands.run(
+                _EVAL_CMD, cwd="/testbed", user="root", timeout=cmd_timeout
+            )
         except CommandExitException:
             pass
         output = await sbx.files.read("/tmp/test_output.txt", user="root")
@@ -205,6 +278,8 @@ async def run_instance_async(
         verdict = _grade(ts, prediction, output)
         verdict["collection_error"] = _detect_collection_error(output)
         verdict["warning_error"] = _detect_warning_error(output)
+        verdict["resource_exhausted"] = bool(_RESOURCE_EXHAUSTED.search(output))
+        await _attach_execution_stats_async(verdict, sbx, started_at)
         if keep_output:
             verdict["_output"] = output
         return verdict

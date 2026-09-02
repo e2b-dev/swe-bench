@@ -1,14 +1,14 @@
 #!/usr/bin/env python
-"""Pre-build E2B templates (Strategy A) for a set of instances.
+"""Pre-build immutable E2B templates for a set of instances.
 
 Build is server-side on E2B (no local Docker) and idempotent: existing
 templates are skipped unless --force. Builds run in parallel PROCESSES (one
 E2B connection each — threads share an HTTP/2 connection and collide).
 
-    python scripts/build_templates.py --per-repo 1            # one per repo (~12)
+    python scripts/build_templates.py --per-repo 1            # one per repository
     python scripts/build_templates.py --limit 20
     python scripts/build_templates.py --instances astropy__astropy-12907,sympy__sympy-20438
-    python scripts/build_templates.py --all --workers 8       # all 500
+    python scripts/build_templates.py --all --workers 8       # selected dataset
 """
 
 import argparse
@@ -23,7 +23,9 @@ def main() -> int:
     ap.add_argument("--instances", help="comma-separated instance_ids")
     ap.add_argument("--per-repo", type=int, help="build N instances per distinct repo")
     ap.add_argument("--limit", type=int, help="build the first N instances")
-    ap.add_argument("--all", action="store_true", help="build every instance in the dataset")
+    ap.add_argument(
+        "--all", action="store_true", help="build every instance in the dataset"
+    )
     ap.add_argument("--cpu", type=int, default=DEFAULT_CPU)
     ap.add_argument("--memory-mb", type=int, default=DEFAULT_MEMORY_MB)
     ap.add_argument("--workers", type=int, default=4, help="parallel build processes")
@@ -47,14 +49,21 @@ def main() -> int:
         print(f"NOT IN DATASET: {i}")
     selected = [instances[i] for i in ids if i in instances]
 
-    print(f"Building {len(selected)} template(s) with {args.workers} worker process(es) ...")
+    print(
+        f"Building {len(selected)} template(s) with {args.workers} worker process(es) ..."
+    )
     results = build_many(
-        selected, workers=args.workers, cpu_count=args.cpu,
-        memory_mb=args.memory_mb, force=args.force,
+        selected,
+        workers=args.workers,
+        cpu_count=args.cpu,
+        memory_mb=args.memory_mb,
+        force=args.force,
     )
 
     built = sum(1 for r in results.values() if not isinstance(r, Exception) and r[1])
-    exists = sum(1 for r in results.values() if not isinstance(r, Exception) and not r[1])
+    exists = sum(
+        1 for r in results.values() if not isinstance(r, Exception) and not r[1]
+    )
     failed = sum(1 for r in results.values() if isinstance(r, Exception)) + len(missing)
     print(f"\nbuilt={built} exists={exists} failed={failed}")
     return 1 if failed else 0

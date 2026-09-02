@@ -42,8 +42,8 @@ def empty_prediction(instance: dict) -> dict:
 
 def select_per_repo(instances: dict, n: int = 1) -> list[str]:
     """Pick the first n instance_ids from each distinct repo (sorted for
-    determinism). Use this to span all ~12 repos — exercising every per-repo
-    log parser — instead of alphabetically over-sampling with --limit."""
+    determinism). This spans repository-specific log parsers instead of
+    alphabetically over-sampling with --limit."""
     by_repo: dict[str, list[str]] = {}
     for iid in sorted(instances):
         repo = instances[iid]["repo"]

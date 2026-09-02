@@ -22,11 +22,22 @@ from e2b_swebench import (
     gold_prediction,
     load_instances,
     quiet_logs,
+    resolve_template_specs,
     run_many,
     select_per_repo,
 )
-from e2b_swebench.config import DEFAULT_CONCURRENCY
-from e2b_swebench.runner import summarize
+from e2b_swebench.config import DEFAULT_CONCURRENCY, DEFAULT_CPU, DEFAULT_MEMORY_MB
+from e2b_swebench.runner import evaluation_identity, summarize
+
+_RUN_IDENTITY_FIELDS = (
+    "evaluation_schema",
+    "template",
+    "content_key",
+    "source_image",
+    "instance_key",
+    "prediction_key",
+    "run_key",
+)
 
 
 def load_predictions(path: str) -> list[dict]:
@@ -34,20 +45,38 @@ def load_predictions(path: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+def _matches_run_identity(verdict: dict, identity: dict[str, str | int]) -> bool:
+    return all(verdict.get(field) == identity[field] for field in _RUN_IDENTITY_FIELDS)
+
+
 def main() -> int:
     quiet_logs()
     ap = argparse.ArgumentParser()
     src = ap.add_mutually_exclusive_group(required=True)
-    src.add_argument("--gold", action="store_true", help="evaluate gold patches (sanity)")
+    src.add_argument(
+        "--gold", action="store_true", help="evaluate gold patches (sanity)"
+    )
     src.add_argument("--predictions", help="path to predictions.jsonl")
     ap.add_argument("--instances", help="comma-separated instance_ids to restrict to")
     ap.add_argument("--limit", type=int, help="first N instances")
-    ap.add_argument("--per-repo", type=int, help="gold mode: select N instances per distinct repo")
+    ap.add_argument(
+        "--per-repo", type=int, help="gold mode: select N instances per distinct repo"
+    )
     ap.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
-    ap.add_argument("--build", action="store_true", help="lazily build missing templates first")
-    ap.add_argument("--build-workers", type=int, default=8, help="parallel template builds")
-    ap.add_argument("--out", default="results", help="output dir for predictions.jsonl + report.json")
-    ap.add_argument("--resume", action="store_true", help="skip instances already in <out>/verdicts.jsonl")
+    ap.add_argument("--cpu", type=int, default=DEFAULT_CPU)
+    ap.add_argument("--memory-mb", type=int, default=DEFAULT_MEMORY_MB)
+    ap.add_argument(
+        "--build", action="store_true", help="lazily build missing templates first"
+    )
+    ap.add_argument(
+        "--build-workers", type=int, default=8, help="parallel template builds"
+    )
+    ap.add_argument("--out", help="output dir (default: results/<cpu>c-<memory>m)")
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="skip instances already in <out>/verdicts.jsonl",
+    )
     args = ap.parse_args()
 
     instances = load_instances()
@@ -74,34 +103,84 @@ def main() -> int:
     predictions = [p for p in predictions if p["instance_id"] in instances]
     print(f"Selected {len(predictions)} prediction(s)")
 
+    template_specs = asyncio.run(
+        resolve_template_specs(
+            instances,
+            predictions,
+            cpu_count=args.cpu,
+            memory_mb=args.memory_mb,
+        )
+    )
+    run_identities = {
+        prediction["instance_id"]: evaluation_identity(
+            template_specs[prediction["instance_id"]],
+            instances[prediction["instance_id"]],
+            prediction,
+        )
+        for prediction in predictions
+    }
+
+    if args.out is None:
+        args.out = f"results/{args.cpu}c-{args.memory_mb}m"
     os.makedirs(args.out, exist_ok=True)
     verdicts_path = os.path.join(args.out, "verdicts.jsonl")
+    with open(os.path.join(args.out, "run_manifest.json"), "w") as f:
+        json.dump({"runs": run_identities}, f, indent=2, sort_keys=True)
 
     # full prediction set in official-harness format (written before running)
     with open(os.path.join(args.out, "predictions.jsonl"), "w") as f:
-        for p in predictions:
-            f.write(json.dumps(p) + "\n")
+        f.writelines(json.dumps(p) + "\n" for p in predictions)
 
     if args.resume and os.path.exists(verdicts_path):
-        done = set()
+        retained_verdicts = []
         with open(verdicts_path) as f:
             for line in f:
                 if line.strip():
-                    done.add(json.loads(line)["instance_id"])
+                    verdict = json.loads(line)
+                    iid = verdict.get("instance_id")
+                    identity = run_identities.get(iid)
+                    if identity is not None and _matches_run_identity(
+                        verdict, identity
+                    ):
+                        retained_verdicts.append(verdict)
+        with open(verdicts_path, "w") as f:
+            f.writelines(json.dumps(verdict) + "\n" for verdict in retained_verdicts)
+        done = {verdict["instance_id"] for verdict in retained_verdicts}
         before = len(predictions)
         predictions = [p for p in predictions if p["instance_id"] not in done]
-        print(f"resume: {len(done)} already done; {len(predictions)}/{before} remaining")
-    elif os.path.exists(verdicts_path):
-        os.remove(verdicts_path)  # fresh run — don't mix with a stale verdicts log
+        print(
+            f"resume: {len(done)} already done; {len(predictions)}/{before} remaining"
+        )
+    else:
+        with open(verdicts_path, "w"):
+            pass  # fresh run — don't mix with a stale verdicts log
 
     if args.build:
-        print(f"Building missing templates ({args.build_workers} parallel processes) ...")
-        build_many([instances[p["instance_id"]] for p in predictions], workers=args.build_workers)
+        print(
+            f"Building missing templates ({args.build_workers} parallel processes) ..."
+        )
+        build_many(
+            [instances[p["instance_id"]] for p in predictions],
+            workers=args.build_workers,
+            cpu_count=args.cpu,
+            memory_mb=args.memory_mb,
+            resolved_specs=template_specs,
+        )
 
-    print(f"Evaluating {len(predictions)} prediction(s) at concurrency={args.concurrency}")
-    asyncio.run(run_many(
-        instances, predictions, concurrency=args.concurrency, result_path=verdicts_path,
-    ))
+    print(
+        f"Evaluating {len(predictions)} prediction(s) at concurrency={args.concurrency}"
+    )
+    asyncio.run(
+        run_many(
+            instances,
+            predictions,
+            concurrency=args.concurrency,
+            result_path=verdicts_path,
+            cpu_count=args.cpu,
+            memory_mb=args.memory_mb,
+            template_specs=template_specs,
+        )
+    )
 
     # summarize from verdicts.jsonl (source of truth: resumed + newly completed)
     all_verdicts = []
@@ -113,9 +192,17 @@ def main() -> int:
     with open(os.path.join(args.out, "report.json"), "w") as f:
         json.dump({"report": report, "verdicts": all_verdicts}, f, indent=2)
 
-    print(f"\nresolved {report['resolved']}/{report['total']}  "
-          f"({report['resolved_rate'] * 100:.1f}%)  errored={report['errored']}")
-    print(f"wrote {args.out}/{{predictions.jsonl, verdicts.jsonl, report.json}}")
+    print(
+        f"\nresolved {report['resolved']}/{report['total']}  "
+        f"({report['resolved_rate'] * 100:.1f}%)  errored={report['errored']}"
+    )
+    print(
+        f"categories: {report['categories']}  resource_exhausted={report['resource_exhausted']}"
+    )
+    print(
+        f"wrote {args.out}/"
+        "{predictions.jsonl,run_manifest.json,verdicts.jsonl,report.json}"
+    )
     return 0
 
 
