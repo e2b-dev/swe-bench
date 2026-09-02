@@ -120,6 +120,60 @@ class LedgerTests(unittest.TestCase):
         }
         self.assertEqual(categorize_verdict(verdict)[0], "fail")
 
+    def test_artifact_requires_literal_true_patch_flag(self):
+        verdict = {
+            "instance_id": "astropy__astropy-7606",
+            "tests_status": {
+                "FAIL_TO_PASS": {"failure": []},
+                "PASS_TO_PASS": {
+                    "failure": [
+                        "astropy/units/tests/test_units.py::test_compose_roundtrip[]"
+                    ]
+                },
+            },
+        }
+
+        for patch_applied in (1, "false"):
+            with self.subTest(patch_applied=patch_applied):
+                verdict["patch_successfully_applied"] = patch_applied
+                self.assertEqual(categorize_verdict(verdict)[0], "fail")
+
+    def test_malformed_failure_containers_are_not_artifacts(self):
+        expected_failure = "astropy/units/tests/test_units.py::test_compose_roundtrip[]"
+        malformed_failures = {
+            "FAIL_TO_PASS": (
+                ("mapping", {}),
+                ("set", set()),
+                ("none", None),
+                ("integer", 1),
+                ("non_string_list", [1]),
+            ),
+            "PASS_TO_PASS": (
+                ("mapping", {expected_failure: True}),
+                ("set", {expected_failure}),
+                ("none", None),
+                ("integer", 1),
+                ("unhashable_member", [[]]),
+                ("non_string_list", [1]),
+            ),
+        }
+
+        for status_name, malformed_values in malformed_failures.items():
+            for malformed_name, malformed_value in malformed_values:
+                with self.subTest(
+                    status_name=status_name, malformed_name=malformed_name
+                ):
+                    verdict = {
+                        "instance_id": "astropy__astropy-7606",
+                        "patch_successfully_applied": True,
+                        "tests_status": {
+                            "FAIL_TO_PASS": {"failure": []},
+                            "PASS_TO_PASS": {"failure": [expected_failure]},
+                        },
+                    }
+                    verdict["tests_status"][status_name]["failure"] = malformed_value
+                    self.assertEqual(categorize_verdict(verdict)[0], "fail")
+
     def test_only_exact_audited_p2p_failure_signatures_are_artifacts(self):
         signatures = {
             "astropy__astropy-7606": (
@@ -156,6 +210,7 @@ class LedgerTests(unittest.TestCase):
                 "wrong": (failed_tests - {next(iter(failed_tests))}) | {"wrong_test"},
                 "missing": failed_tests - {next(iter(failed_tests))},
                 "extra": failed_tests | {"extra_test"},
+                "duplicate": [*failed_tests, next(iter(failed_tests))],
             }
             for mutation, mutated_failed_tests in mutated_signatures.items():
                 with self.subTest(instance_id=instance_id, mutation=mutation):

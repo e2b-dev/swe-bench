@@ -20,6 +20,7 @@ import datetime
 import json
 import os
 from collections import Counter
+from collections.abc import Sized
 
 DONE = ("pass", "grader_artifact", "ordering_artifact")
 
@@ -48,16 +49,28 @@ _KNOWN_GOLD_ARTIFACTS = {
 }
 
 
+def _safe_failure_count(failures: object) -> int:
+    return len(failures) if isinstance(failures, Sized) else 0
+
+
+def _is_failure_list(failures: object) -> bool:
+    return isinstance(failures, list) and all(
+        isinstance(failure, str) for failure in failures
+    )
+
+
 def categorize_verdict(v: dict) -> tuple[str, dict]:
     """Map a driver verdict to a (category, detail) pair for the ledger."""
     ts = v.get("tests_status") or {}
     f2p = ts.get("FAIL_TO_PASS", {}) or {}
     p2p = ts.get("PASS_TO_PASS", {}) or {}
+    actual_f2p_failures = f2p.get("failure", [])
+    actual_p2p_failures = p2p.get("failure", [])
     detail = {
         "resolved": bool(v.get("resolved")),
         "patch_applied": bool(v.get("patch_successfully_applied")),
-        "f2p_fail": len(f2p.get("failure", [])),
-        "p2p_fail": len(p2p.get("failure", [])),
+        "f2p_fail": _safe_failure_count(actual_f2p_failures),
+        "p2p_fail": _safe_failure_count(actual_p2p_failures),
         "error": v.get("error"),
         "collection_error": bool(v.get("collection_error")),
         "warning_error": bool(v.get("warning_error")),
@@ -78,9 +91,10 @@ def categorize_verdict(v: dict) -> tuple[str, dict]:
     known_artifact = _KNOWN_GOLD_ARTIFACTS.get(v.get("instance_id"))
     if known_artifact:
         category, reason, expected_p2p_failures = known_artifact
-        actual_p2p_failures = p2p.get("failure", [])
         if (
-            detail["patch_applied"]
+            v.get("patch_successfully_applied") is True
+            and _is_failure_list(actual_f2p_failures)
+            and _is_failure_list(actual_p2p_failures)
             and detail["f2p_fail"] == 0
             and len(actual_p2p_failures) == len(expected_p2p_failures)
             and set(actual_p2p_failures) == expected_p2p_failures
