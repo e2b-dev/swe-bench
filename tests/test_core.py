@@ -109,9 +109,9 @@ class LedgerTests(unittest.TestCase):
             self.assertTrue(ledger.is_done("task", 4, 8192))
             self.assertFalse(ledger.is_done("task", 2, 4096))
 
-    def test_only_audited_p2p_failure_is_an_artifact(self):
+    def test_arbitrary_p2p_failure_is_not_an_artifact(self):
         verdict = {
-            "instance_id": "new__case-1",
+            "instance_id": "astropy__astropy-7606",
             "patch_successfully_applied": True,
             "tests_status": {
                 "FAIL_TO_PASS": {"failure": []},
@@ -120,10 +120,49 @@ class LedgerTests(unittest.TestCase):
         }
         self.assertEqual(categorize_verdict(verdict)[0], "fail")
 
-        verdict["instance_id"] = "astropy__astropy-7606"
-        category, detail = categorize_verdict(verdict)
-        self.assertEqual(category, "grader_artifact")
-        self.assertIn("unit0", detail["artifact_reason"])
+    def test_only_exact_audited_p2p_failure_signatures_are_artifacts(self):
+        signatures = {
+            "astropy__astropy-7606": (
+                "grader_artifact",
+                {
+                    "astropy/units/tests/test_units.py::test_compose_roundtrip[]",
+                },
+            ),
+            "django__django-10097": (
+                "ordering_artifact",
+                {
+                    "test_add (generic_inline_admin.tests.GenericInlineAdminWithUniqueTogetherTest)",
+                    "test_delete (generic_inline_admin.tests.GenericInlineAdminWithUniqueTogetherTest)",
+                    "test_no_param (generic_inline_admin.tests.GenericInlineAdminParametersTest)",
+                    "test_basic_add_GET (generic_inline_admin.tests.GenericAdminViewTest)",
+                    "test_basic_edit_GET (generic_inline_admin.tests.GenericAdminViewTest)",
+                },
+            ),
+        }
+
+        for instance_id, (expected_category, failed_tests) in signatures.items():
+            with self.subTest(instance_id=instance_id, mutation="exact"):
+                verdict = {
+                    "instance_id": instance_id,
+                    "patch_successfully_applied": True,
+                    "tests_status": {
+                        "FAIL_TO_PASS": {"failure": []},
+                        "PASS_TO_PASS": {"failure": list(failed_tests)},
+                    },
+                }
+                self.assertEqual(categorize_verdict(verdict)[0], expected_category)
+
+            mutated_signatures = {
+                "wrong": (failed_tests - {next(iter(failed_tests))}) | {"wrong_test"},
+                "missing": failed_tests - {next(iter(failed_tests))},
+                "extra": failed_tests | {"extra_test"},
+            }
+            for mutation, mutated_failed_tests in mutated_signatures.items():
+                with self.subTest(instance_id=instance_id, mutation=mutation):
+                    verdict["tests_status"]["PASS_TO_PASS"]["failure"] = list(
+                        mutated_failed_tests
+                    )
+                    self.assertEqual(categorize_verdict(verdict)[0], "fail")
 
     def test_environment_failure_is_retried(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -30,10 +30,20 @@ _KNOWN_GOLD_ARTIFACTS = {
     "astropy__astropy-7606": (
         "grader_artifact",
         "pytest emits test_compose_roundtrip[unit0], dataset expects []",
+        {
+            "astropy/units/tests/test_units.py::test_compose_roundtrip[]",
+        },
     ),
     "django__django-10097": (
         "ordering_artifact",
         "five generic_inline_admin tests pass alone but fail after the full suite",
+        {
+            "test_add (generic_inline_admin.tests.GenericInlineAdminWithUniqueTogetherTest)",
+            "test_delete (generic_inline_admin.tests.GenericInlineAdminWithUniqueTogetherTest)",
+            "test_no_param (generic_inline_admin.tests.GenericInlineAdminParametersTest)",
+            "test_basic_add_GET (generic_inline_admin.tests.GenericAdminViewTest)",
+            "test_basic_edit_GET (generic_inline_admin.tests.GenericAdminViewTest)",
+        },
     ),
 }
 
@@ -66,15 +76,17 @@ def categorize_verdict(v: dict) -> tuple[str, dict]:
     if v.get("warning_error"):
         return "warning_error", detail
     known_artifact = _KNOWN_GOLD_ARTIFACTS.get(v.get("instance_id"))
-    if (
-        known_artifact
-        and detail["patch_applied"]
-        and detail["f2p_fail"] == 0
-        and detail["p2p_fail"] > 0
-    ):
-        category, reason = known_artifact
-        detail["artifact_reason"] = reason
-        return category, detail
+    if known_artifact:
+        category, reason, expected_p2p_failures = known_artifact
+        actual_p2p_failures = p2p.get("failure", [])
+        if (
+            detail["patch_applied"]
+            and detail["f2p_fail"] == 0
+            and len(actual_p2p_failures) == len(expected_p2p_failures)
+            and set(actual_p2p_failures) == expected_p2p_failures
+        ):
+            detail["artifact_reason"] = reason
+            return category, detail
     return "fail", detail
 
 
