@@ -66,7 +66,7 @@ register(
         check_model=muse_spark.check_model,
         generate_prediction=muse_spark.generate_prediction,
         empty_prediction=muse_spark.empty_agent_prediction,
-        requires_env=("META_API_KEY",),
+        requires_env=("META_API_KEY (or MODEL_API_KEY)",),
     )
 )
 

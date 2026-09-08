@@ -36,6 +36,10 @@ DEFAULT_MODEL = "muse-spark-1.1"
 # request, authentication, and model errors are surfaced immediately.
 DEFAULT_MAX_RETRIES = 5
 
+# Every credential that must never appear in a saved trajectory. META_API_KEY
+# is this project's name for the Model API key; MODEL_API_KEY is Meta's.
+SECRET_ENV_VARS = ("META_API_KEY", "MODEL_API_KEY", "E2B_API_KEY")
+
 DEFAULT_MAX_STEPS = 30
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_TOOL_OUTPUT_CHARS = 12_000
@@ -197,7 +201,7 @@ class Trajectory:
                 ensure_ascii=False,
                 indent=2,
             )
-            for name in ("META_API_KEY", "E2B_API_KEY"):
+            for name in SECRET_ENV_VARS:
                 secret = os.environ.get(name)
                 if secret:
                     payload = payload.replace(
@@ -227,7 +231,8 @@ class ModelUnavailable(RuntimeError):
         detail = getattr(cause, "body", None) or str(cause)
         super().__init__(
             f"the model API rejected a connectivity check for {model!r}: {detail}\n"
-            f"Check META_API_KEY, META_BASE_URL, and the model id (--model). "
+            f"Check META_API_KEY (or MODEL_API_KEY), META_BASE_URL, and the "
+            f"model id (--model). "
             f"Meta's published id is {DEFAULT_MODEL!r}."
         )
 
@@ -492,9 +497,13 @@ def create_model_client(max_retries: int = DEFAULT_MAX_RETRIES) -> Any:
             "pip install -e '.[muse]'"
         ) from error
 
-    api_key = os.environ.get("META_API_KEY")
+    # Meta's own docs and CLIs name this MODEL_API_KEY; accept both so a shell
+    # already set up for the Model API works here unchanged.
+    api_key = os.environ.get("META_API_KEY") or os.environ.get("MODEL_API_KEY")
     if not api_key:
-        raise RuntimeError("META_API_KEY is required to generate predictions")
+        raise RuntimeError(
+            "META_API_KEY (or MODEL_API_KEY) is required to generate predictions"
+        )
 
     return OpenAI(
         api_key=api_key,
