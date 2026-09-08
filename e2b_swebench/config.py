@@ -14,7 +14,11 @@ ARCH = "x86_64"
 
 # --- template build resources ---
 DEFAULT_CPU = int(os.environ.get("SWEBENCH_CPU", "8"))  # SWE-bench recommends 8 vCPU/instance
-DEFAULT_MEMORY_MB = int(os.environ.get("SWEBENCH_MEMORY_MB", "16384"))  # 16 GB; must be even
+# SWE-bench recommends 16 GiB, but E2B accounts cap template memory at 8 GiB by
+# default, so 16384 makes the very first build fail with a 400. 8 GiB is what
+# every account can actually build; raise it (support raises the cap) with
+# SWEBENCH_MEMORY_MB=16384 to match the upstream recommendation. Must be even.
+DEFAULT_MEMORY_MB = int(os.environ.get("SWEBENCH_MEMORY_MB", "8192"))
 TEMPLATE_PREFIX = "swebench-"
 
 # --- runtime timeouts (seconds) ---
