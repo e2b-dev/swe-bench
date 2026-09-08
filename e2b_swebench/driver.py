@@ -72,7 +72,7 @@ def _detect_warning_error(output: str) -> bool:
     return bool(_WARNING_E_LINE.search(output)) or "is using nose-specific method" in output
 
 
-def _create_sandbox(template: str, timeout: int, *, allow_internet_access: bool = True):
+def _create_sandbox(template: str, timeout: int, *, allow_internet_access: bool = False):
     for attempt in range(_RL_RETRIES):
         try:
             return Sandbox.create(
@@ -120,7 +120,7 @@ def run_instance(
     dict ({'resolved': bool, 'patch_successfully_applied': bool, ...})."""
     ts = make_test_spec(instance, namespace=NAMESPACE, arch=ARCH)
     patch = prediction.get("model_patch") or ""
-    sbx = _create_sandbox(template, sandbox_timeout)
+    sbx = _create_sandbox(template, sandbox_timeout, allow_internet_access=True)
     try:
         # 1. apply the prediction patch (empty patch = no-op, still graded)
         applied = not patch.strip()

@@ -14,15 +14,15 @@ from tests.conftest import (
 )
 
 
-@pytest.mark.parametrize("internet", [True, False])
-def test_network_policy_reaches_sdk(monkeypatch, internet):
+def test_network_policy_reaches_sdk(monkeypatch):
     calls = []
     monkeypatch.setattr(driver.Sandbox, "create", lambda *a, **kw: calls.append(kw))
-    if internet:
-        driver._create_sandbox("template", 60)
-    else:
-        driver._create_sandbox("template", 60, allow_internet_access=False)
-    assert calls == [{"timeout": 60, "allow_internet_access": internet}]
+    driver._create_sandbox("template", 60)
+    driver._create_sandbox("template", 60, allow_internet_access=True)
+    assert calls == [
+        {"timeout": 60, "allow_internet_access": False},
+        {"timeout": 60, "allow_internet_access": True},
+    ]
 
 
 @pytest.mark.parametrize(
