@@ -165,6 +165,22 @@ def test_trace_redacts_keys_from_error(tmp_path, instance, monkeypatch):
     assert "[REDACTED]" in path.read_text()
 
 
+def test_trace_redacts_metas_own_key_name(tmp_path, instance, monkeypatch):
+    """A key supplied as MODEL_API_KEY is still a key, so it cannot reach the trace."""
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    monkeypatch.setenv("MODEL_API_KEY", "test-secret-model-api")
+    path = tmp_path / "trace.json"
+    generate_prediction(
+        instance,
+        "t",
+        FakeClient(raises=RuntimeError("test-secret-model-api")),
+        create_sandbox=SandboxFactory(FakeSandbox()),
+        trajectory_path=path,
+    )
+    assert "test-secret" not in path.read_text()
+    assert "[REDACTED]" in path.read_text()
+
+
 def test_initial_write_failure_creates_no_sandbox(tmp_path, instance):
     blocked = tmp_path / "not-a-directory"
     blocked.write_text("keep")

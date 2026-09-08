@@ -748,11 +748,37 @@ def test_the_base_url_can_be_overridden_by_env(monkeypatch):
     assert captured["base_url"] == "https://proxy.internal/v1"
 
 
+def test_metas_own_key_name_is_accepted(monkeypatch):
+    """Meta's docs and CLIs export MODEL_API_KEY; that shell should work as-is."""
+    from e2b_swebench.agents.muse_spark import create_model_client
+
+    captured = {}
+    _install_openai_double(monkeypatch, lambda **kw: captured.update(kw) or object())
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    monkeypatch.setenv("MODEL_API_KEY", "sk-model-api")
+
+    create_model_client()
+    assert captured["api_key"] == "sk-model-api"
+
+
+def test_this_projects_key_name_wins_when_both_are_set(monkeypatch):
+    from e2b_swebench.agents.muse_spark import create_model_client
+
+    captured = {}
+    _install_openai_double(monkeypatch, lambda **kw: captured.update(kw) or object())
+    monkeypatch.setenv("META_API_KEY", "sk-meta")
+    monkeypatch.setenv("MODEL_API_KEY", "sk-model-api")
+
+    create_model_client()
+    assert captured["api_key"] == "sk-meta"
+
+
 def test_a_missing_api_key_is_refused_before_any_request(monkeypatch):
     from e2b_swebench.agents.muse_spark import create_model_client
 
     _install_openai_double(monkeypatch, lambda **_: object())
     monkeypatch.delenv("META_API_KEY", raising=False)
+    monkeypatch.delenv("MODEL_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="META_API_KEY"):
         create_model_client()
 
