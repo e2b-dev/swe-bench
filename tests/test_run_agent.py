@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from e2b_swebench.agents import REGISTRY, AgentSpec, agent_names, get_agent
-from e2b_swebench.agents.muse_spark import GenerationResult
+from e2b_swebench.agents.muse_spark import GenerationResult, TrajectoryWriteError
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_agent.py"
 STUB = "test-stub"
@@ -85,6 +85,20 @@ def _ok_generator(model=None):
 
 def _argv(monkeypatch, *extra):
     monkeypatch.setattr("sys.argv", ["run_agent.py", "--agent", STUB, *extra])
+
+
+def test_trajectory_failure_stops_batch(run_agent_script, monkeypatch, tmp_path):
+    calls = []
+
+    def generate(instance, template, client, **kwargs):
+        calls.append(kwargs["trajectory_path"])
+        raise TrajectoryWriteError("disk full")
+
+    _wire(run_agent_script, monkeypatch, _instances("a__a-1", "a__a-2"), generate)
+    _argv(monkeypatch, "--limit", "2", "--out", str(tmp_path / "predictions.jsonl"))
+    assert run_agent_script.main() == 1
+    assert calls == [str(tmp_path / "trajectories" / "a__a-1.traj.json")]
+    assert (tmp_path / "predictions.jsonl").read_text() == ""
 
 
 # --- the registry ------------------------------------------------------------

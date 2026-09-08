@@ -12,8 +12,11 @@ import json
 import os
 import posixpath
 import shlex
+import tempfile
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from e2b import CommandExitException
@@ -155,6 +158,64 @@ class GenerationResult:
             "fatal": self.fatal,
             "final_message": self.final_message,
         }
+
+
+class TrajectoryWriteError(RuntimeError):
+    """Generation cannot continue without its audit trail."""
+
+
+class Trajectory:
+    """Persist the conversation after each message, before the next action."""
+
+    def __init__(self, path: str | Path | None, result: GenerationResult):
+        self.path = Path(path) if path is not None else None
+        self.result = result
+        self.messages: list[dict[str, Any]] = []
+        self.stop_reason = "running"
+
+    def record(self, message: dict[str, Any], step: int) -> None:
+        self.messages.append(message)
+        self.result.steps = step
+        self.save()
+
+    def save(self) -> None:
+        if self.path is None:
+            return
+        temporary = None
+        try:
+            payload = json.dumps(
+                {
+                    "trajectory_format": "muse-spark-1.0",
+                    "instance_id": self.result.instance_id,
+                    "messages": self.messages,
+                    "info": {
+                        **self.result.to_dict(),
+                        "stop_reason": self.stop_reason,
+                        "allow_internet_access": False,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            for name in ("META_API_KEY", "E2B_API_KEY"):
+                secret = os.environ.get(name)
+                if secret:
+                    payload = payload.replace(
+                        json.dumps(secret, ensure_ascii=False)[1:-1], "[REDACTED]"
+                    )
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.path.parent, delete=False
+            ) as output:
+                temporary = Path(output.name)
+                output.write(payload + "\n")
+            os.replace(temporary, self.path)
+        except (OSError, TypeError, ValueError) as error:
+            raise TrajectoryWriteError("could not save trajectory") from error
+        finally:
+            if temporary is not None:
+                with suppress(OSError):
+                    temporary.unlink(missing_ok=True)
 
 
 class ModelUnavailable(RuntimeError):
@@ -366,6 +427,7 @@ def run_agent(
     task: str,
     model: str,
     max_steps: int,
+    trajectory: Trajectory | None = None,
 ) -> tuple[str, int]:
     """Run the model loop. Returns (final message, steps used).
 
@@ -380,6 +442,9 @@ def run_agent(
         {"role": "system", "content": system_prompt(workspace.workspace)},
         {"role": "user", "content": task},
     ]
+    if trajectory is not None:
+        for message in messages:
+            trajectory.record(message, 0)
 
     for step in range(1, max_steps + 1):
         # Meta's Chat Completions tool calling currently accepts only "auto".
@@ -392,9 +457,13 @@ def run_agent(
         message = response.choices[0].message
         # Replay the assistant tool-call message before its corresponding results.
         messages.append(_message_as_dict(message))
+        if trajectory is not None:
+            trajectory.record(messages[-1], step)
         tool_calls = getattr(message, "tool_calls", None) or []
 
         if not tool_calls:
+            if trajectory is not None:
+                trajectory.stop_reason = "completed"
             return message.content or "(the model returned no final summary)", step
 
         for tool_call in tool_calls:
@@ -405,7 +474,11 @@ def run_agent(
                     "content": _run_tool_call(workspace, tool_call),
                 }
             )
+            if trajectory is not None:
+                trajectory.record(messages[-1], step)
 
+    if trajectory is not None:
+        trajectory.stop_reason = "step_limit"
     return f"(step limit of {max_steps} reached)", max_steps
 
 
@@ -460,21 +533,25 @@ def generate_prediction(
     sandbox_timeout: int = cfg.SANDBOX_TIMEOUT,
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     create_sandbox: Any = _create_sandbox,
+    trajectory_path: str | Path | None = None,
 ) -> tuple[dict[str, Any], GenerationResult]:
     """Run the agent on one instance in a fresh sandbox.
 
     Returns (prediction, generation result). Never raises for a model, tool, or
     sandbox failure: the prediction comes back with an empty patch and the
     reason lands in the GenerationResult. Sandbox cleanup is attempted on every
-    path, including KeyboardInterrupt.
+    path, including KeyboardInterrupt. Interrupts and trajectory persistence
+    failures propagate to the caller.
     """
     instance_id = instance["instance_id"]
     result = GenerationResult(instance_id=instance_id, model=model, status="error")
+    trajectory = Trajectory(trajectory_path, result)
+    trajectory.save()
 
     sandbox = None
     try:
         # No `envs=`: API keys and held-out benchmark data stay in the caller.
-        sandbox = create_sandbox(template, sandbox_timeout)
+        sandbox = create_sandbox(template, sandbox_timeout, allow_internet_access=False)
         result.sandbox_id = getattr(sandbox, "sandbox_id", None)
         workspace = SandboxWorkspace(sandbox, command_timeout=command_timeout)
         head = workspace.head_commit()
@@ -486,6 +563,7 @@ def generate_prediction(
             task=task_prompt(instance),
             model=model,
             max_steps=max_steps,
+            trajectory=trajectory,
         )
         result.steps = steps
         result.final_message = final_message
@@ -502,8 +580,15 @@ def generate_prediction(
             result,
         )
     except KeyboardInterrupt:
+        trajectory.stop_reason = "interrupted"
+        result.error = "KeyboardInterrupt"
+        raise
+    except TrajectoryWriteError:
+        trajectory.stop_reason = "error"
+        result.error = "trajectory persistence failed"
         raise
     except Exception as error:  # noqa: BLE001 - instance failures become empty predictions
+        trajectory.stop_reason = "error"
         result.status = "error"
         result.error = repr(error)
         result.fatal = is_permanent_model_error(error)
@@ -515,6 +600,7 @@ def generate_prediction(
             except Exception as cleanup_error:  # noqa: BLE001
                 detail = f"sandbox cleanup failed: {cleanup_error!r}"
                 result.error = f"{result.error}; {detail}" if result.error else detail
+        trajectory.save()
 
 
 class MissingTemplates(RuntimeError):

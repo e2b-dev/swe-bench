@@ -14,7 +14,7 @@ from e2b_swebench.agents import (
     check_templates,
     get_agent,
 )
-from e2b_swebench.agents.muse_spark import DEFAULT_MAX_STEPS
+from e2b_swebench.agents.muse_spark import DEFAULT_MAX_STEPS, TrajectoryWriteError
 from e2b_swebench.config import SANDBOX_TIMEOUT
 from e2b_swebench.templates import template_name
 
@@ -31,7 +31,9 @@ def positive_int(value: str) -> int:
 def select_ids(instances: dict, args: argparse.Namespace) -> list[str]:
     """Same selection vocabulary as build_templates.py / run_eval.py."""
     if args.instances:
-        ids = [s.strip() for s in args.instances.split(",") if s.strip()]
+        ids = list(
+            dict.fromkeys(s.strip() for s in args.instances.split(",") if s.strip())
+        )
     elif args.per_repo:
         ids = select_per_repo(instances, args.per_repo)
     elif args.limit:
@@ -159,6 +161,7 @@ def main() -> int:
     print(f"Instances: {len(ids)}  (max_steps={args.max_steps})\n")
 
     counts: dict[str, int] = {"ok": 0, "empty_patch": 0, "error": 0}
+    trajectory_dir = os.path.join(os.path.dirname(args.out) or ".", "trajectories")
     stopped_early = False
     with _open_fresh(args.out) as preds, _open_fresh(status_path) as status:
         for i, iid in enumerate(ids, 1):
@@ -170,10 +173,16 @@ def main() -> int:
                     model=model,
                     max_steps=args.max_steps,
                     sandbox_timeout=args.sandbox_timeout,
+                    trajectory_path=os.path.join(trajectory_dir, f"{iid}.traj.json"),
                 )
             except KeyboardInterrupt:
-                print("\ninterrupted; the sandbox was killed and partial output kept")
+                print(
+                    "\ninterrupted; sandbox cleanup attempted and partial output kept"
+                )
                 raise
+            except TrajectoryWriteError as error:
+                print(f"\nStopping: {error}")
+                return 1
             except Exception as error:  # noqa: BLE001 - keep other instances running
                 prediction = agent.empty_prediction(iid, model)
                 result = GenerationResult(

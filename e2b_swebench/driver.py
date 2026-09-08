@@ -72,10 +72,12 @@ def _detect_warning_error(output: str) -> bool:
     return bool(_WARNING_E_LINE.search(output)) or "is using nose-specific method" in output
 
 
-def _create_sandbox(template: str, timeout: int):
+def _create_sandbox(template: str, timeout: int, *, allow_internet_access: bool = True):
     for attempt in range(_RL_RETRIES):
         try:
-            return Sandbox.create(template, timeout=timeout)
+            return Sandbox.create(
+                template, timeout=timeout, allow_internet_access=allow_internet_access
+            )
         except RateLimitException:
             if attempt == _RL_RETRIES - 1:
                 raise

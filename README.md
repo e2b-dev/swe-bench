@@ -254,6 +254,10 @@ Use `python scripts/run_agent.py --list-agents` to list the available agents and
 
 Before generation, the script checks that every selected template exists and sends a short model request to catch an invalid key or model id. Generation is sequential, and sandbox cleanup runs even if an instance fails. Cleanup failures are reported in the status output. A failed instance still produces an empty-patch row, so it is graded unresolved instead of being omitted. Permanent API errors stop the batch early.
 
+Generation sandboxes have internet access disabled, preventing tools from looking up solutions online. Dependencies must already be installed in the instance template. Model API requests run on the caller machine; grading sandbox networking is unchanged.
+
+Each instance writes `trajectories/<instance_id>.traj.json` beside the predictions file. The trace contains the model-facing messages, tool calls and results, and generation metadata. It is atomically replaced after each message and finalized after cleanup, including on errors and keyboard interrupts. If persistence fails, generation stops. Tool output in the trace has the same truncation as the model input. Use a fresh output directory for each run: rerunning overwrites selected traces but does not remove traces from earlier selections. When calling `generate_prediction` directly, pass `trajectory_path` to enable persistence.
+
 The defaults follow Meta's public [Model API cookbook](https://github.com/meta-models/meta-model-cookbook): the OpenAI-compatible endpoint is `https://api.meta.ai/v1` and the default model is `muse-spark-1.1`. Override the endpoint with `META_BASE_URL` and the model with `--model` or `META_MODEL`.
 
 **Generation uses both Meta Model API and E2B resources.** Start with one explicit `--instances` id. The implementation is covered by offline tests, but a live end-to-end run requires valid credentials and incurs provider usage.
@@ -292,6 +296,7 @@ Notes:
 | `results/report.json` | run_eval | summary + all verdicts |
 | `results/predictions.jsonl` | run_eval, run_agent | the predictions that were scored / generated |
 | `results/generation.jsonl` | run_agent | per-instance generation status (steps, patch size, sandbox id, error) — **not** graded |
+| `results/trajectories/<instance_id>.traj.json` | run_agent | incrementally saved conversation and generation metadata |
 
 ---
 
