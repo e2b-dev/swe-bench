@@ -172,7 +172,7 @@ python scripts/build_and_verify.py --per-repo 2 --batch-size 12
 | `--workers` | 8 | parallel template builds (processes) |
 | `--verify-concurrency` | 20 | concurrent verify sandboxes (E2B free-tier cap; raise on paid tiers) |
 | `--max-batches` | — | stop after N batches this session |
-| `--cpu` / `--memory-mb` | 8 / 16384 | template resources |
+| `--cpu` / `--memory-mb` | 8 / 8192 | template resources |
 | `--stop-on-fail` | — | halt after any batch that isn't all `pass`/`ordering_artifact`, to investigate before continuing |
 | `--ledger` | `results/ledger.json` | progress file |
 | `--status` | — | print ledger summary and exit |
@@ -229,7 +229,7 @@ The model receives only the repository name and `problem_statement`. It does not
 
 ```bash
 pip install -e '.[muse]'
-export META_API_KEY=...          # stays in this process
+export META_API_KEY=...          # stays in this process (MODEL_API_KEY also works)
 export E2B_API_KEY=...
 
 # Templates must already exist; see §4c.
@@ -258,9 +258,30 @@ Generation sandboxes have internet access disabled, preventing tools from lookin
 
 Each instance writes `trajectories/<instance_id>.traj.json` beside the predictions file. The trace contains the model-facing messages, tool calls and results, and generation metadata. It is atomically replaced after each message and finalized after cleanup, including on errors and keyboard interrupts. If persistence fails, generation stops. Tool output in the trace has the same truncation as the model input. Use a fresh output directory for each run: rerunning overwrites selected traces but does not remove traces from earlier selections. When calling `generate_prediction` directly, pass `trajectory_path` to enable persistence.
 
-The defaults follow Meta's public [Model API cookbook](https://github.com/meta-models/meta-model-cookbook): the OpenAI-compatible endpoint is `https://api.meta.ai/v1` and the default model is `muse-spark-1.1`. Override the endpoint with `META_BASE_URL` and the model with `--model` or `META_MODEL`.
+The defaults follow Meta's public [Model API cookbook](https://github.com/meta-models/meta-model-cookbook): the OpenAI-compatible endpoint is `https://api.meta.ai/v1` and the default model is `muse-spark-1.1`. Override the endpoint with `META_BASE_URL` and the model with `--model` or `META_MODEL`. The key is read from `META_API_KEY`, falling back to `MODEL_API_KEY` (the name Meta's own docs and CLIs use).
 
-**Generation uses both Meta Model API and E2B resources.** Start with one explicit `--instances` id. The implementation is covered by offline tests, but a live end-to-end run requires valid credentials and incurs provider usage.
+The account decides which models are callable; `client.models.list()` reports them. Standard-tier ids (`muse-spark-1.1`, `-1.2`, `-1.3`) bill at $1.25/1M input and $4.25/1M output. Contributor-tier ids (`muse-spark-1.2-contributor`, `-1.3-contributor`) bill at $0.10/$0.20, roughly 12x cheaper, in exchange for Meta training on the prompts and completions. SWE-bench instances are public data, so a contributor-tier model is usually the right choice for a full sweep:
+
+```bash
+python scripts/run_agent.py --instances <ids> --model muse-spark-1.2-contributor
+```
+
+#### Measured cost and wall clock
+
+One live instance (`astropy__astropy-12907`, `muse-spark-1.1`, `--max-steps 30`, 8 vCPU / 8 GiB) **resolved**, at:
+
+| | |
+| --- | --- |
+| template build / generation / grading | 64s / 6m07s / 2m24s |
+| input tokens | ~427k over 30 requests (history is resent each step) |
+| E2B compute | ~$0.08 (template build plus both sandboxes, at $0.000148/s) |
+| Meta Model API | ~$0.56 standard tier, ~$0.04 contributor tier |
+
+So roughly **$0.65 per instance** on standard tier and **$0.13** on contributor tier; SWE-bench_Verified (500) lands near $320-465 and $65-80 respectively.
+
+Two caveats. Reasoning tokens bill as output but are not written to the trajectory, so a trace-derived output estimate is a floor, not the bill. And the binding constraint is time, not money: generation is sequential at ~6 min/instance, so 500 instances is ~50 hours even though the concurrency cap allows far more.
+
+**Generation uses both Meta Model API and E2B resources.** Start with one explicit `--instances` id.
 
 ---
 
@@ -275,13 +296,20 @@ The per-script CLI flags (§4) take precedence over these defaults.
 | `SWEBENCH_SPLIT` | `test` | dataset split |
 | `SWEBENCH_NAMESPACE` | `swebench` | image source — `swebench` pulls the prebuilt images from Docker Hub |
 | `SWEBENCH_CPU` | `8` | vCPUs per template (also `--cpu`) |
-| `SWEBENCH_MEMORY_MB` | `16384` | RAM per template, MiB, must be even (also `--memory-mb`) |
+| `SWEBENCH_MEMORY_MB` | `8192` | RAM per template, MiB, must be even (also `--memory-mb`) |
 | `SWEBENCH_SANDBOX_TIMEOUT` | `2400` | sandbox lifetime, seconds |
 | `SWEBENCH_CMD_TIMEOUT` | `1800` | per-command (`eval.sh`) timeout, seconds |
 | `SWEBENCH_CONCURRENCY` | `20` | **max concurrent sandboxes = E2B free-tier cap**; raise on paid tiers (also `--concurrency` / `--verify-concurrency`) |
 
 Notes:
 - Arch is fixed to **x86_64** (E2B is amd64; SWE-bench's arm64 images are incomplete).
+- **Memory is capped at 8192 MiB** on E2B accounts by default. SWE-bench recommends
+  16 GiB, but requesting it fails the *first* template build with
+  `BuildException: 400: Memory can't be higher than 8192 MiB`, so the default here
+  is 8192. Ask E2B support to raise the cap, then set `SWEBENCH_MEMORY_MB=16384`.
+  Gold-verify results were identical at 4096 and 8192 MiB on the instances checked
+  (`astropy-12907`, `sympy-11618`, `django-10097`), so these instances are not
+  sensitive to memory in that range; 16 GiB itself is untested here because of the cap.
 - **Template-build parallelism** is a separate knob — `--workers` (default 4 in
   `build_templates.py`, 8 in `build_and_verify.py`); it stays below the concurrency cap.
 
