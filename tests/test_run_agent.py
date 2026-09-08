@@ -108,7 +108,7 @@ def test_muse_spark_is_registered_and_not_hardcoded():
     assert "muse-spark" in agent_names()
     spec = get_agent("muse-spark")
     assert spec.default_model == "muse-spark-1.1"
-    assert spec.requires_env == ("META_API_KEY",)
+    assert spec.requires_env == ("META_API_KEY (or MODEL_API_KEY)",)
     # the runner only ever needs these four callables
     for attr in (
         "create_client",
